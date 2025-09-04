@@ -244,6 +244,7 @@ Docs & Ops
 CI
 - GitHub Actions workflow at `.github/workflows/ci.yml` runs lint, type-checks, tests, and Docker build on push/PR.
  - Integration job spins up Postgres and runs an Alembic smoke test.
+ - App integration runs a minimal flow against Postgres: `/setup` (migrate/seed), list clauses, create assessment, and fetch envelope/detail.
 
 Tools
 - Insomnia collection: see `docs/insomnia_export.json`. Import and set `baseUrl` and `token` in the environment.

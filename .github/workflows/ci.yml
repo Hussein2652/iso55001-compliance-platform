@@ -66,10 +66,14 @@ jobs:
             backend/requirements-dev.txt
       - name: Install deps
         run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-      - name: Run alembic against Postgres and smoke test
+      - name: Run Alembic against Postgres and smoke test
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/iso55001
         run: pytest -q -k test_pg_smoke
+      - name: App integration tests against Postgres
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/iso55001
+        run: pytest -q -k test_pg_app
       - name: Ensure README updated when core changes present
         if: github.event_name == 'push' || github.event_name == 'pull_request'
         run: |
