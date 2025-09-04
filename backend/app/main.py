@@ -114,6 +114,14 @@ attachments_table = Table(
     Column("disposition", String),
 )
 
+organizations_table = Table(
+    "organizations",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("name", String, nullable=False),
+    Column("created_at", String, nullable=False),
+)
+
 # Audits and Nonconformities
 audits_table = Table(
     "audits",
@@ -283,6 +291,21 @@ class Envelope(GenericModel, Generic[T]):
     total: int
     limit: int
     offset: int
+
+
+class OrganizationCreate(BaseModel):
+    id: str
+    name: str
+
+
+class OrganizationUpdate(BaseModel):
+    name: Optional[str] = None
+
+
+class Organization(BaseModel):
+    id: str
+    name: str
+    created_at: str
 
 
 class AuditStatus(str, Enum):
@@ -869,6 +892,60 @@ def v1_list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0):
         total = conn.execute(text(("SELECT COUNT(*) FROM clauses WHERE clause_id LIKE :q OR title LIKE :q OR summary LIKE :q") if q else ("SELECT COUNT(*) FROM clauses")), params if q else {}).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
     return Envelope[Clause](items=[Clause(**dict(r)) for r in rows], total=int(total or 0), limit=limit, offset=offset)
+
+
+@router_v1.post("/orgs", response_model=Organization, tags=["Organizations"], responses={400:{"model":ErrorResponse}}, summary="Create an organization")
+def v1_create_org(payload: OrganizationCreate, _auth=Depends(role_required("admin"))):
+    now = datetime.utcnow().isoformat()
+    if not payload.id or len(payload.id) > 64:
+        raise HTTPException(status_code=400, detail="invalid id")
+    with engine.begin() as conn:
+        exists = conn.execute(text("SELECT 1 FROM organizations WHERE id = :id"), {"id": payload.id}).first()
+        if exists:
+            # idempotent create returns existing
+            row = conn.execute(text("SELECT * FROM organizations WHERE id = :id"), {"id": payload.id}).mappings().first()
+            return Organization(**dict(row))
+        conn.execute(text("INSERT INTO organizations (id, name, created_at) VALUES (:id, :name, :ts)"), {"id": payload.id, "name": payload.name, "ts": now})
+        row = conn.execute(text("SELECT * FROM organizations WHERE id = :id"), {"id": payload.id}).mappings().first()
+    return Organization(**dict(row))
+
+
+@router_v1.get("/orgs", response_model=Envelope[Organization], tags=["Organizations"], summary="List organizations")
+def v1_list_orgs(limit: int = 50, offset: int = 0, _auth=Depends(role_required("admin"))):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM organizations")).scalar_one()
+        rows = conn.execute(text("SELECT * FROM organizations ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"), {"limit": limit, "offset": offset}).mappings().all()
+    return Envelope[Organization](items=[Organization(**dict(r)) for r in rows], total=int(total or 0), limit=limit, offset=offset)
+
+
+@router_v1.get("/orgs/{org_id}", response_model=Organization, tags=["Organizations"], responses={404:{"model":ErrorResponse}}, summary="Get organization")
+def v1_get_org(org_id: str, _auth=Depends(role_required("admin"))):
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT * FROM organizations WHERE id = :id"), {"id": org_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    return Organization(**dict(row))
+
+
+@router_v1.patch("/orgs/{org_id}", response_model=Organization, tags=["Organizations"], responses={400:{"model":ErrorResponse},404:{"model":ErrorResponse}}, summary="Update organization")
+def v1_update_org(org_id: str, payload: OrganizationUpdate, _auth=Depends(role_required("admin"))):
+    updates = {}
+    if payload.name is not None:
+        updates["name"] = payload.name
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    updates["id"] = org_id
+    set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
+    with engine.begin() as conn:
+        res = conn.execute(text(f"UPDATE organizations SET {set_clause} WHERE id = :id"), updates)
+        if res.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        row = conn.execute(text("SELECT * FROM organizations WHERE id = :id"), {"id": org_id}).mappings().first()
+    return Organization(**dict(row))
 
 
 app.include_router(router_v1)

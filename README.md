@@ -86,12 +86,17 @@ API (high level)
 - `GET /export/audit_nonconformities.csv|.xlsx` — joined export of Audits with associated NCs.
   - Filters: CSV `audit_id`, `status`, `severity`.
 - `GET /dashboard` — static dashboard with KPIs and overdue NCs.
- - `/v1` envelope routes — consistent pagination `{ items, total, limit, offset }` (legacy routes still supported):
-   - `GET /v1/assessments`
-   - `GET /v1/audits`
-   - `GET /v1/nonconformities`
-   - `GET /v1/management-reviews`
-   - `GET /v1/clauses`
+- `/v1` envelope routes — consistent pagination `{ items, total, limit, offset }` (legacy routes still supported):
+  - `GET /v1/assessments`
+  - `GET /v1/audits`
+  - `GET /v1/nonconformities`
+  - `GET /v1/management-reviews`
+  - `GET /v1/clauses`
+ - Organizations (admin):
+   - `POST /v1/orgs` — create organization (idempotent)
+   - `GET /v1/orgs?limit=&offset=` — list
+   - `GET /v1/orgs/{id}` — detail
+   - `PATCH /v1/orgs/{id}` — update (name)
  - Evidence (S3 pre‑signed):
    - `POST /attachments/presign_upload` — get pre‑signed PUT URL (editor role; rate‑limited).
    - `POST /attachments/complete` — record uploaded object metadata (editor role).
