@@ -1,0 +1,70 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2025-09-04T00:00:00.000Z",
+  "__export_source": "iso55001-backend",
+  "resources": [
+    {
+      "_id": "env_1",
+      "_type": "environment",
+      "name": "Base Environment",
+      "data": {"baseUrl": "http://localhost:8000", "token": "devtoken"}
+    },
+    {
+      "_id": "fld_root",
+      "_type": "request_group",
+      "name": "ISO 55001 API",
+      "children": []
+    },
+    {
+      "_id": "req_health",
+      "_type": "request",
+      "parentId": "fld_root",
+      "name": "Health",
+      "method": "GET",
+      "url": "{{ baseUrl }}/health",
+      "headers": []
+    },
+    {
+      "_id": "req_setup",
+      "_type": "request",
+      "parentId": "fld_root",
+      "name": "Setup (admin)",
+      "method": "POST",
+      "url": "{{ baseUrl }}/setup",
+      "headers": [{"name":"Authorization","value":"Bearer {{ token }}"}]
+    },
+    {
+      "_id": "req_clauses",
+      "_type": "request",
+      "parentId": "fld_root",
+      "name": "List Clauses",
+      "method": "GET",
+      "url": "{{ baseUrl }}/clauses?q=policy",
+      "headers": []
+    },
+    {
+      "_id": "req_assess_create",
+      "_type": "request",
+      "parentId": "fld_root",
+      "name": "Create Assessment",
+      "method": "POST",
+      "url": "{{ baseUrl }}/assessments",
+      "headers": [
+        {"name":"Authorization","value":"Bearer {{ token }}"},
+        {"name":"Content-Type","value":"application/json"}
+      ],
+      "body": {"mimeType":"application/json","text":"{\n  \"clause_id\": \"4.1\",\n  \"status\": \"Compliant\"\n}"}
+    },
+    {
+      "_id": "req_kpi_overview",
+      "_type": "request",
+      "parentId": "fld_root",
+      "name": "KPI Overview",
+      "method": "GET",
+      "url": "{{ baseUrl }}/kpi/overview",
+      "headers": []
+    }
+  ]
+}
+

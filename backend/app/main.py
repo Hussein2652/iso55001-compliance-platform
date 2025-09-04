@@ -858,6 +858,32 @@ def v1_list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0):
 app.include_router(router_v1)
 
 
+# --- Setup (admin) ---
+@app.post("/setup")
+def setup(request: Request, _auth=Depends(role_required("admin"))):
+    actions = []
+    # Ensure org exists if DEFAULT_ORG_ID set
+    default_org = os.getenv("DEFAULT_ORG_ID")
+    if default_org:
+        with engine.begin() as conn:
+            row = conn.execute(text("SELECT 1 FROM organizations WHERE id = :id"), {"id": default_org}).first()
+            if not row:
+                conn.execute(text("INSERT INTO organizations (id, name, created_at) VALUES (:id, :name, :ts)"), {
+                    "id": default_org,
+                    "name": default_org,
+                    "ts": datetime.utcnow().isoformat(),
+                })
+                actions.append(f"created_org:{default_org}")
+    # Seed clauses if empty
+    with engine.connect() as conn:
+        cnt = conn.execute(text("SELECT COUNT(1) FROM clauses")).scalar_one()
+    if not cnt:
+        seed_clauses_if_empty()
+        actions.append("seeded_clauses")
+    # Return summary
+    return {"ok": True, "actions": actions}
+
+
 @app.get("/clauses/{clause_id}", response_model=Clause)
 def get_clause(clause_id: str):
     with engine.connect() as conn:
