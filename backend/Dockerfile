@@ -20,5 +20,6 @@ COPY . /app
 # Expose and run
 EXPOSE 8000
 ENV DATABASE_URL="sqlite:////app/backend/app.db"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
+COPY backend/start.sh /app/backend/start.sh
+RUN chmod +x /app/backend/start.sh
+CMD ["/app/backend/start.sh"]

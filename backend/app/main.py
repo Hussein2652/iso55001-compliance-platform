@@ -59,6 +59,10 @@ assessments_table = Table(
     Column("due_date", String),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
+    Column("org_id", String),
+    Column("created_by", String),
+    Column("updated_by", String),
+    Column("request_id", String),
 )
 
 attachments_table = Table(
@@ -71,6 +75,9 @@ attachments_table = Table(
     Column("size", Integer),
     Column("stored_path", String, nullable=False),
     Column("created_at", String, nullable=False),
+    Column("org_id", String),
+    Column("created_by", String),
+    Column("request_id", String),
 )
 
 # Audits and Nonconformities
@@ -85,6 +92,10 @@ audits_table = Table(
     Column("completed_date", String),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
+    Column("org_id", String),
+    Column("created_by", String),
+    Column("updated_by", String),
+    Column("request_id", String),
 )
 
 nonconformities_table = Table(
@@ -102,6 +113,10 @@ nonconformities_table = Table(
     Column("closed_date", String),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
+    Column("org_id", String),
+    Column("created_by", String),
+    Column("updated_by", String),
+    Column("request_id", String),
 )
 
 management_reviews_table = Table(
@@ -118,6 +133,10 @@ management_reviews_table = Table(
     Column("actions", String),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
+    Column("org_id", String),
+    Column("created_by", String),
+    Column("updated_by", String),
+    Column("request_id", String),
 )
 
 
@@ -348,6 +367,12 @@ if 'REQUEST_COUNT' not in globals():
         "Total HTTP requests",
         labelnames=("method", "status"),
     )
+if 'ERROR_COUNT' not in globals():
+    ERROR_COUNT = Counter(
+        "http_requests_errors_total",
+        "Total HTTP error responses",
+        labelnames=("method", "status"),
+    )
 
 # duration histogram (seconds) with per-route label
 if 'REQUEST_DURATION' not in globals():
@@ -364,11 +389,15 @@ async def add_request_id_and_collect_metrics(request: Request, call_next):
     req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
     logger = get_logger()
     start = time.perf_counter()
+    # Capture auth/tenant context from headers if present
+    request.state.request_id = req_id
+    request.state.org_id = request.headers.get("X-Org-ID") or os.getenv("DEFAULT_ORG_ID")
     try:
         response: Response = await call_next(request)
     except Exception as exc:
         duration_ms = (time.perf_counter() - start) * 1000.0
         REQUEST_COUNT.labels(method=request.method, status=str(500)).inc()
+        ERROR_COUNT.labels(method=request.method, status=str(500)).inc()
         route_label = getattr(request.scope.get("route"), "path", request.url.path)
         REQUEST_DURATION.labels(method=request.method, route=route_label, status="500").observe(duration_ms / 1000.0)
         logger.error(
@@ -390,6 +419,8 @@ async def add_request_id_and_collect_metrics(request: Request, call_next):
         raise
     response.headers["X-Request-ID"] = req_id
     REQUEST_COUNT.labels(method=request.method, status=str(response.status_code)).inc()
+    if response.status_code >= 400:
+        ERROR_COUNT.labels(method=request.method, status=str(response.status_code)).inc()
     duration_ms = (time.perf_counter() - start) * 1000.0
     route_label = getattr(request.scope.get("route"), "path", request.url.path)
     REQUEST_DURATION.labels(method=request.method, route=route_label, status=str(response.status_code)).observe(duration_ms / 1000.0)
@@ -589,7 +620,7 @@ def get_clause(clause_id: str):
 
 
 @app.post("/assessments", response_model=Assessment, status_code=201)
-def create_assessment(payload: AssessmentCreate, _auth=Depends(role_required("editor"))):
+def create_assessment(payload: AssessmentCreate, request: Request, _auth=Depends(role_required("editor"))):
     # Ensure clause exists
     with engine.connect() as conn:
         exists = conn.execute(
@@ -602,14 +633,14 @@ def create_assessment(payload: AssessmentCreate, _auth=Depends(role_required("ed
         res = conn.execute(
             text(
                 """
-                INSERT INTO assessments (clause_id, status, evidence, owner, due_date, created_at, updated_at)
-                VALUES (:clause_id, :status, :evidence, :owner, :due_date, :created_at, :updated_at)
+                INSERT INTO assessments (clause_id, status, evidence, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:clause_id, :status, :evidence, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO assessments (clause_id, status, evidence, owner, due_date, created_at, updated_at)
-                VALUES (:clause_id, :status, :evidence, :owner, :due_date, :created_at, :updated_at)
+                INSERT INTO assessments (clause_id, status, evidence, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:clause_id, :status, :evidence, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 """
             ),
             {
@@ -620,6 +651,10 @@ def create_assessment(payload: AssessmentCreate, _auth=Depends(role_required("ed
                 "due_date": payload.due_date.isoformat() if payload.due_date else None,
                 "created_at": now,
                 "updated_at": now,
+                "org_id": getattr(request.state, "org_id", None),
+                "created_by": (_auth or {}).get("sub"),
+                "updated_by": (_auth or {}).get("sub"),
+                "request_id": getattr(request.state, "request_id", None),
             },
         )
         if DEFAULT_DB_URL.startswith("sqlite"):
@@ -691,8 +726,31 @@ def _ensure_evidence_dir():
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# --- Basic in-memory rate limiter for sensitive routes ---
+_RATE_STATE = {}
+
+def rate_limit(key: str, limit: int = 30, window_sec: int = 60):
+    import time as _t
+    now = int(_t.time())
+    window = now // window_sec
+    k = (key, window)
+    count = _RATE_STATE.get(k, 0) + 1
+    _RATE_STATE[k] = count
+    # cleanup previous window
+    prev = (key, window - 1)
+    _RATE_STATE.pop(prev, None)
+    if count > limit:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
 @app.post("/assessments/{assessment_id}/attachments", response_model=Attachment, status_code=201)
-def upload_attachment(assessment_id: int, file: UploadFile = File(...), _auth=Depends(role_required("editor"))):
+def upload_attachment(assessment_id: int, request: Request, file: UploadFile = File(...), _auth=Depends(role_required("editor"))):
+    # Rate limit and size check
+    rate_limit(f"upload:{request.client.host if request.client else 'local'}")
+    max_mb = int(os.getenv("MAX_UPLOAD_MB", "25"))
+    cl = request.headers.get("content-length")
+    if cl and int(cl) > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Payload too large")
     with engine.connect() as conn:
         exists = conn.execute(text("SELECT 1 FROM assessments WHERE id = :id"), {"id": assessment_id}).first()
         if not exists:
@@ -712,14 +770,14 @@ def upload_attachment(assessment_id: int, file: UploadFile = File(...), _auth=De
         res = conn.execute(
             text(
                 """
-                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at)
-                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at)
+                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id)
+                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at)
-                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at)
+                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id)
+                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id)
                 """
             ),
             {
@@ -729,6 +787,9 @@ def upload_attachment(assessment_id: int, file: UploadFile = File(...), _auth=De
                 "size": int(size),
                 "stored_path": str(dest_path),
                 "created_at": now,
+                "org_id": getattr(request.state, "org_id", None),
+                "created_by": (_auth or {}).get("sub"),
+                "request_id": getattr(request.state, "request_id", None),
             },
         )
         if DEFAULT_DB_URL.startswith("sqlite"):
@@ -787,7 +848,7 @@ def delete_attachment(attachment_id: int, _auth=Depends(role_required("admin")))
 
 
 @app.patch("/assessments/{assessment_id}", response_model=Assessment)
-def update_assessment(assessment_id: int, payload: AssessmentUpdate, _auth=Depends(role_required("editor"))):
+def update_assessment(assessment_id: int, payload: AssessmentUpdate, request: Request, _auth=Depends(role_required("editor"))):
     updates = {}
     if payload.status is not None:
         updates["status"] = payload.status.value if hasattr(payload.status, "value") else payload.status
@@ -800,6 +861,8 @@ def update_assessment(assessment_id: int, payload: AssessmentUpdate, _auth=Depen
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     updates["updated_at"] = datetime.utcnow().isoformat()
+    updates["updated_by"] = (_auth or {}).get("sub")
+    updates["request_id"] = getattr(request.state, "request_id", None)
     updates["id"] = assessment_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:
@@ -825,20 +888,20 @@ def _row_to_audit(row) -> Audit:
 
 
 @app.post("/audits", response_model=Audit, status_code=201)
-def create_audit(payload: AuditCreate, _auth=Depends(role_required("editor"))):
+def create_audit(payload: AuditCreate, request: Request, _auth=Depends(role_required("editor"))):
     now = datetime.utcnow().isoformat()
     with engine.begin() as conn:
         res = conn.execute(
             text(
                 """
-                INSERT INTO audits (title, description, status, scheduled_date, created_at, updated_at)
-                VALUES (:title, :description, :status, :scheduled_date, :created_at, :updated_at)
+                INSERT INTO audits (title, description, status, scheduled_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:title, :description, :status, :scheduled_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO audits (title, description, status, scheduled_date, created_at, updated_at)
-                VALUES (:title, :description, :status, :scheduled_date, :created_at, :updated_at)
+                INSERT INTO audits (title, description, status, scheduled_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:title, :description, :status, :scheduled_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 """
             ),
             {
@@ -848,6 +911,10 @@ def create_audit(payload: AuditCreate, _auth=Depends(role_required("editor"))):
                 "scheduled_date": payload.scheduled_date.isoformat() if payload.scheduled_date else None,
                 "created_at": now,
                 "updated_at": now,
+                "org_id": getattr(request.state, "org_id", None),
+                "created_by": (_auth or {}).get("sub"),
+                "updated_by": (_auth or {}).get("sub"),
+                "request_id": getattr(request.state, "request_id", None),
             },
         )
         if DEFAULT_DB_URL.startswith("sqlite"):
@@ -890,7 +957,7 @@ def get_audit(audit_id: int):
 
 
 @app.patch("/audits/{audit_id}", response_model=Audit)
-def update_audit(audit_id: int, payload: AuditUpdate, _auth=Depends(role_required("editor"))):
+def update_audit(audit_id: int, payload: AuditUpdate, request: Request, _auth=Depends(role_required("editor"))):
     updates = {}
     if payload.title is not None:
         updates["title"] = payload.title
@@ -905,6 +972,8 @@ def update_audit(audit_id: int, payload: AuditUpdate, _auth=Depends(role_require
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     updates["updated_at"] = datetime.utcnow().isoformat()
+    updates["updated_by"] = (_auth or {}).get("sub")
+    updates["request_id"] = getattr(request.state, "request_id", None)
     updates["id"] = audit_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:
@@ -928,7 +997,7 @@ def _row_to_nc(row) -> Nonconformity:
 
 
 @app.post("/nonconformities", response_model=Nonconformity, status_code=201)
-def create_nonconformity(payload: NonconformityCreate, _auth=Depends(role_required("editor"))):
+def create_nonconformity(payload: NonconformityCreate, request: Request, _auth=Depends(role_required("editor"))):
     # Validate foreign keys (audit_id, clause_id) if provided
     with engine.connect() as conn:
         if payload.audit_id is not None:
@@ -944,14 +1013,14 @@ def create_nonconformity(payload: NonconformityCreate, _auth=Depends(role_requir
         res = conn.execute(
             text(
                 """
-                INSERT INTO nonconformities (audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, created_at, updated_at)
-                VALUES (:audit_id, :clause_id, :severity, :status, :description, :corrective_action, :owner, :due_date, :created_at, :updated_at)
+                INSERT INTO nonconformities (audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:audit_id, :clause_id, :severity, :status, :description, :corrective_action, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO nonconformities (audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, created_at, updated_at)
-                VALUES (:audit_id, :clause_id, :severity, :status, :description, :corrective_action, :owner, :due_date, :created_at, :updated_at)
+                INSERT INTO nonconformities (audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:audit_id, :clause_id, :severity, :status, :description, :corrective_action, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 """
             ),
             {
@@ -965,6 +1034,10 @@ def create_nonconformity(payload: NonconformityCreate, _auth=Depends(role_requir
                 "due_date": payload.due_date.isoformat() if payload.due_date else None,
                 "created_at": now,
                 "updated_at": now,
+                "org_id": getattr(request.state, "org_id", None),
+                "created_by": (_auth or {}).get("sub"),
+                "updated_by": (_auth or {}).get("sub"),
+                "request_id": getattr(request.state, "request_id", None),
             },
         )
         if DEFAULT_DB_URL.startswith("sqlite"):
@@ -1027,7 +1100,7 @@ def get_nonconformity(nc_id: int):
 
 
 @app.patch("/nonconformities/{nc_id}", response_model=Nonconformity)
-def update_nonconformity(nc_id: int, payload: NonconformityUpdate, _auth=Depends(role_required("editor"))):
+def update_nonconformity(nc_id: int, payload: NonconformityUpdate, request: Request, _auth=Depends(role_required("editor"))):
     updates = {}
     if payload.description is not None:
         updates["description"] = payload.description
@@ -1059,6 +1132,8 @@ def update_nonconformity(nc_id: int, payload: NonconformityUpdate, _auth=Depends
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     updates["updated_at"] = datetime.utcnow().isoformat()
+    updates["updated_by"] = (_auth or {}).get("sub")
+    updates["request_id"] = getattr(request.state, "request_id", None)
     updates["id"] = nc_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:
@@ -1082,20 +1157,20 @@ def _row_to_mr(row) -> ManagementReview:
 
 
 @app.post("/management-reviews", response_model=ManagementReview, status_code=201)
-def create_management_review(payload: ManagementReviewCreate, _auth=Depends(role_required("editor"))):
+def create_management_review(payload: ManagementReviewCreate, request: Request, _auth=Depends(role_required("editor"))):
     now = datetime.utcnow().isoformat()
     with engine.begin() as conn:
         res = conn.execute(
             text(
                 """
-                INSERT INTO management_reviews (title, period_start, period_end, meeting_date, participants, summary, decisions, actions, created_at, updated_at)
-                VALUES (:title, :period_start, :period_end, :meeting_date, :participants, :summary, :decisions, :actions, :created_at, :updated_at)
+                INSERT INTO management_reviews (title, period_start, period_end, meeting_date, participants, summary, decisions, actions, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:title, :period_start, :period_end, :meeting_date, :participants, :summary, :decisions, :actions, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO management_reviews (title, period_start, period_end, meeting_date, participants, summary, decisions, actions, created_at, updated_at)
-                VALUES (:title, :period_start, :period_end, :meeting_date, :participants, :summary, :decisions, :actions, :created_at, :updated_at)
+                INSERT INTO management_reviews (title, period_start, period_end, meeting_date, participants, summary, decisions, actions, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:title, :period_start, :period_end, :meeting_date, :participants, :summary, :decisions, :actions, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 """
             ),
             {
@@ -1109,6 +1184,10 @@ def create_management_review(payload: ManagementReviewCreate, _auth=Depends(role
                 "actions": payload.actions,
                 "created_at": now,
                 "updated_at": now,
+                "org_id": getattr(request.state, "org_id", None),
+                "created_by": (_auth or {}).get("sub"),
+                "updated_by": (_auth or {}).get("sub"),
+                "request_id": getattr(request.state, "request_id", None),
             },
         )
         if DEFAULT_DB_URL.startswith("sqlite"):
@@ -1144,7 +1223,7 @@ def get_management_review(mr_id: int):
 
 
 @app.patch("/management-reviews/{mr_id}", response_model=ManagementReview)
-def update_management_review(mr_id: int, payload: ManagementReviewUpdate, _auth=Depends(role_required("editor"))):
+def update_management_review(mr_id: int, payload: ManagementReviewUpdate, request: Request, _auth=Depends(role_required("editor"))):
     updates = {}
     if payload.title is not None:
         updates["title"] = payload.title
@@ -1165,6 +1244,8 @@ def update_management_review(mr_id: int, payload: ManagementReviewUpdate, _auth=
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     updates["updated_at"] = datetime.utcnow().isoformat()
+    updates["updated_by"] = (_auth or {}).get("sub")
+    updates["request_id"] = getattr(request.state, "request_id", None)
     updates["id"] = mr_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:

@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check backend || true
+      - name: Type check (mypy)
+        run: |
+          pip install mypy
+          mypy --ignore-missing-imports backend || true
+      - name: Tests
+        run: pytest -q
+      - name: Build Docker image
+        run: docker build -t iso55001-backend -f backend/Dockerfile .
