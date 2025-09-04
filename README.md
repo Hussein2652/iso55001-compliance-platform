@@ -134,13 +134,15 @@ Environment Variables
  - `ENV`: `dev` or `prod` (prod enforces RS256/JWKS and ignores static token).
  - `CORS_ALLOWED_ORIGINS`: Comma-separated origins (prod should not use `*`).
  - `DEFAULT_ORG_ID`: Optional default org id for dev scoping (header `X-Org-ID` overrides).
- - Object store (S3/MinIO):
+- Object store (S3/MinIO):
    - `OBJECT_STORE_ENDPOINT` (e.g., `http://minio:9000`)
    - `OBJECT_STORE_BUCKET`
    - `OBJECT_STORE_ACCESS_KEY`
    - `OBJECT_STORE_SECRET_KEY`
    - `OBJECT_STORE_USE_PATH_STYLE` (`true`/`false`)
  - Upload limits: `MAX_UPLOAD_MB` (default `25`).
+  - Presign TTL: `PRESIGN_TTL_SECONDS` (default `900`).
+  - MIME allow-list override: `ALLOWED_UPLOAD_MEDIA` (CSV of MIME types).
 - OpenTelemetry:
   - `OTEL_ENABLED` (`true`/`false`)
   - `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g., `http://otel-collector:4318`)

@@ -106,6 +106,10 @@ attachments_table = Table(
     Column("org_id", String),
     Column("created_by", String),
     Column("request_id", String),
+    Column("sha256", String),
+    Column("retention_hold", String),
+    Column("retention_until", String),
+    Column("disposition", String),
 )
 
 # Audits and Nonconformities
@@ -260,6 +264,9 @@ class AttachmentComplete(BaseModel):
     content_type: Optional[str] = None
     size: Optional[int] = None
     sha256: Optional[str] = None
+    retention_hold: Optional[bool] = None
+    retention_until: Optional[date] = None
+    disposition: Optional[str] = None
 
 
 class AuditStatus(str, Enum):
@@ -751,6 +758,103 @@ def v1_list_assessments(
     return {"items": [_row_to_assessment(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
 
 
+@router_v1.get("/audits")
+def v1_list_audits(status: Optional[AuditStatus] = None, limit: int = 50, offset: int = 0, request: Request = None):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    base = "SELECT * FROM audits"
+    params = {}
+    if status:
+        base += " WHERE status = :status"
+        params["status"] = status.value if isinstance(status, AuditStatus) else status
+    org_id = getattr(request.state, "org_id", None) if request else None
+    if org_id:
+        base += (" WHERE " if " WHERE " not in base else " AND ") + " org_id = :org_id"
+        params["org_id"] = org_id
+    base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    params.update({"limit": limit, "offset": offset})
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM audits" + ((" WHERE status = :status" ) if status else "") + (" WHERE org_id = :org_id" if (org_id and not status) else (" AND org_id = :org_id" if org_id else ""))), params).scalar_one()
+        rows = conn.execute(text(base), params).mappings().all()
+    return {"items": [_row_to_audit(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+
+
+@router_v1.get("/nonconformities")
+def v1_list_nonconformities(
+    status: Optional[NCStatusEnum] = None,
+    severity: Optional[SeverityEnum] = None,
+    clause_id: Optional[str] = None,
+    audit_id: Optional[int] = None,
+    limit: int = 50,
+    offset: int = 0,
+    request: Request = None,
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    base = "SELECT * FROM nonconformities"
+    filters = []
+    params = {}
+    if status:
+        filters.append("status = :status"); params["status"] = status.value if isinstance(status, NCStatusEnum) else status
+    if severity:
+        filters.append("severity = :severity"); params["severity"] = severity.value if isinstance(severity, SeverityEnum) else severity
+    if clause_id:
+        filters.append("clause_id = :cid"); params["cid"] = clause_id
+    if audit_id is not None:
+        filters.append("audit_id = :aid"); params["aid"] = audit_id
+    org_id = getattr(request.state, "org_id", None) if request else None
+    if org_id:
+        filters.append("org_id = :org_id"); params["org_id"] = org_id
+    if filters:
+        base += " WHERE " + " AND ".join(filters)
+    base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    params.update({"limit": limit, "offset": offset})
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM nonconformities" + (" WHERE " + " AND ".join(filters) if filters else "")), params).scalar_one()
+        rows = conn.execute(text(base), params).mappings().all()
+    return {"items": [_row_to_nc(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+
+
+@router_v1.get("/management-reviews")
+def v1_list_management_reviews(limit: int = 50, offset: int = 0, request: Request = None):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    order = "ORDER BY meeting_date DESC NULLS LAST, id DESC" if not DEFAULT_DB_URL.startswith("sqlite") else "ORDER BY meeting_date DESC, id DESC"
+    base = f"SELECT * FROM management_reviews"
+    params = {"limit": limit, "offset": offset}
+    org_id = getattr(request.state, "org_id", None) if request else None
+    if org_id:
+        base += " WHERE org_id = :org_id"; params["org_id"] = org_id
+    base += f" {order} LIMIT :limit OFFSET :offset"
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM management_reviews" + (" WHERE org_id = :org_id" if org_id else "")), params if org_id else {}).scalar_one()
+        rows = conn.execute(text(base), params).mappings().all()
+    return {"items": [_row_to_mr(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+
+
+@router_v1.get("/clauses")
+def v1_list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    base = "SELECT clause_id, title, summary FROM clauses"
+    params = {}
+    if q:
+        base += " WHERE clause_id LIKE :q OR title LIKE :q OR summary LIKE :q"; params["q"] = f"%{q}%"
+    base += " ORDER BY clause_id LIMIT :limit OFFSET :offset"; params.update({"limit": limit, "offset": offset})
+    with engine.connect() as conn:
+        total = conn.execute(text(("SELECT COUNT(*) FROM clauses WHERE clause_id LIKE :q OR title LIKE :q OR summary LIKE :q") if q else ("SELECT COUNT(*) FROM clauses")), params if q else {}).scalar_one()
+        rows = conn.execute(text(base), params).mappings().all()
+    return {"items": [Clause(**dict(r)) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+
+
 app.include_router(router_v1)
 
 
@@ -992,13 +1096,17 @@ def download_attachment(attachment_id: int):
 
 
 @app.delete("/attachments/{attachment_id}", status_code=204)
-def delete_attachment(attachment_id: int, _auth=Depends(role_required("admin"))):
+def delete_attachment(attachment_id: int, request: Request, _auth=Depends(role_required("admin"))):
     with engine.begin() as conn:
         row = conn.execute(
-            text("SELECT stored_path FROM attachments WHERE id = :id"), {"id": attachment_id}
+            text("SELECT stored_path, org_id FROM attachments WHERE id = :id"), {"id": attachment_id}
         ).mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="Attachment not found")
+        # org enforcement (if present)
+        req_org = getattr(request, 'state', None) and getattr(request.state, 'org_id', None)
+        if row.get("org_id") and req_org and row.get("org_id") != req_org:
+            raise HTTPException(status_code=403, detail="Forbidden: wrong org")
         conn.execute(text("DELETE FROM attachments WHERE id = :id"), {"id": attachment_id})
     try:
         Path(row["stored_path"]).unlink(missing_ok=True)
@@ -1018,12 +1126,22 @@ def presign_upload(payload: PresignRequest, request: Request, _auth=Depends(role
     fname = re.sub(r"[^A-Za-z0-9_.-]", "_", payload.filename)
     org_id = getattr(request.state, "org_id", "public") or "public"
     key = f"{org_id}/assessments/{payload.assessment_id}/{uuid.uuid4().hex}_{fname}"
+    # MIME allow-list and size limits
+    allowed_env = os.getenv("ALLOWED_UPLOAD_MEDIA")
+    allowed = {m.strip() for m in allowed_env.split(",") if m.strip()} if allowed_env else {
+        "application/pdf", "image/png", "image/jpeg",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv",
+    }
+    if payload.content_type and payload.content_type not in allowed:
+        raise HTTPException(status_code=400, detail=f"content_type not allowed: {payload.content_type}")
+    max_mb = int(os.getenv("MAX_UPLOAD_MB", "25"))
+    if payload.size and payload.size > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="file too large")
     params = {"Bucket": bucket, "Key": key}
     if payload.content_type:
         params["ContentType"] = payload.content_type
-    url = client.generate_presigned_url(
-        "put_object", Params=params, ExpiresIn=900
-    )
+    ttl = int(os.getenv("PRESIGN_TTL_SECONDS", "900"))
+    url = client.generate_presigned_url("put_object", Params=params, ExpiresIn=ttl)
     headers = {}
     if payload.content_type:
         headers["Content-Type"] = payload.content_type
@@ -1039,14 +1157,14 @@ def complete_attachment(payload: AttachmentComplete, request: Request, _auth=Dep
         res = conn.execute(
             text(
                 """
-                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id)
-                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id)
+                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id, sha256, retention_hold, retention_until, disposition)
+                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id, :sha256, :retention_hold, :retention_until, :disposition)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id)
-                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id)
+                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id, sha256, retention_hold, retention_until, disposition)
+                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id, :sha256, :retention_hold, :retention_until, :disposition)
                 """
             ),
             {
@@ -1059,6 +1177,10 @@ def complete_attachment(payload: AttachmentComplete, request: Request, _auth=Dep
                 "org_id": getattr(request.state, "org_id", None),
                 "created_by": (_auth or {}).get("sub"),
                 "request_id": getattr(request.state, "request_id", None),
+                "sha256": payload.sha256,
+                "retention_hold": str(payload.retention_hold) if payload.retention_hold is not None else None,
+                "retention_until": payload.retention_until.isoformat() if payload.retention_until else None,
+                "disposition": payload.disposition,
             },
         )
         if DEFAULT_DB_URL.startswith("sqlite"):
@@ -1114,6 +1236,12 @@ def update_assessment(assessment_id: int, payload: AssessmentUpdate, request: Re
     updates["id"] = assessment_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:
+        # org enforcement
+        org_id = getattr(request.state, "org_id", None)
+        if org_id:
+            cur = conn.execute(text("SELECT org_id FROM assessments WHERE id = :id"), {"id": assessment_id}).mappings().first()
+            if cur and cur.get("org_id") and cur.get("org_id") != org_id:
+                raise HTTPException(status_code=403, detail="Forbidden: wrong org")
         res = conn.execute(text(f"UPDATE assessments SET {set_clause} WHERE id = :id"), updates)
         if res.rowcount == 0:
             raise HTTPException(status_code=404, detail="Assessment not found")
@@ -1232,6 +1360,11 @@ def update_audit(audit_id: int, payload: AuditUpdate, request: Request, _auth=De
     updates["id"] = audit_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:
+        org_id = getattr(request.state, "org_id", None)
+        if org_id:
+            cur = conn.execute(text("SELECT org_id FROM audits WHERE id = :id"), {"id": audit_id}).mappings().first()
+            if cur and cur.get("org_id") and cur.get("org_id") != org_id:
+                raise HTTPException(status_code=403, detail="Forbidden: wrong org")
         res = conn.execute(text(f"UPDATE audits SET {set_clause} WHERE id = :id"), updates)
         if res.rowcount == 0:
             raise HTTPException(status_code=404, detail="Audit not found")
@@ -1397,6 +1530,11 @@ def update_nonconformity(nc_id: int, payload: NonconformityUpdate, request: Requ
     updates["id"] = nc_id
     set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
     with engine.begin() as conn:
+        org_id = getattr(request.state, "org_id", None)
+        if org_id:
+            cur = conn.execute(text("SELECT org_id FROM nonconformities WHERE id = :id"), {"id": nc_id}).mappings().first()
+            if cur and cur.get("org_id") and cur.get("org_id") != org_id:
+                raise HTTPException(status_code=403, detail="Forbidden: wrong org")
         res = conn.execute(text(f"UPDATE nonconformities SET {set_clause} WHERE id = :id"), updates)
         if res.rowcount == 0:
             raise HTTPException(status_code=404, detail="Nonconformity not found")
