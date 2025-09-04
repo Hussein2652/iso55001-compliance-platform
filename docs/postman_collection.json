@@ -1,0 +1,105 @@
+{
+  "info": {
+    "_postman_id": "b5b6e8d5-08cf-4a9c-9a3f-iso55001",
+    "name": "ISO 55001 Compliance API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Common requests for the ISO 55001 backend. Set collection variables baseUrl and token."
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "Setup (admin)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Authorization", "value": "Bearer {{token}}"}
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/setup",
+          "host": ["{{baseUrl}}"],
+          "path": ["setup"]
+        }
+      }
+    },
+    {
+      "name": "List Clauses",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/clauses?q=policy&limit=20&offset=0",
+          "host": ["{{baseUrl}}"],
+          "path": ["clauses"],
+          "query": [
+            {"key": "q", "value": "policy"},
+            {"key": "limit", "value": "20"},
+            {"key": "offset", "value": "0"}
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Assessment",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Authorization", "value": "Bearer {{token}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"clause_id\": \"4.1\",\n  \"status\": \"Compliant\",\n  \"evidence\": \"Context analysis documented in POL-001\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/assessments",
+          "host": ["{{baseUrl}}"],
+          "path": ["assessments"]
+        }
+      }
+    },
+    {
+      "name": "V1 Assessments (envelope)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/v1/assessments?limit=20&offset=0",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "assessments"],
+          "query": [
+            {"key": "limit", "value": "20"},
+            {"key": "offset", "value": "0"}
+          ]
+        }
+      }
+    },
+    {
+      "name": "KPI Overview",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/kpi/overview",
+          "host": ["{{baseUrl}}"],
+          "path": ["kpi", "overview"]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {"key": "baseUrl", "value": "http://localhost:8000"},
+    {"key": "token", "value": "devtoken"}
+  ]
+}
+
