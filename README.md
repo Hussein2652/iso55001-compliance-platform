@@ -86,6 +86,12 @@ API (high level)
 - `GET /export/audit_nonconformities.csv|.xlsx` — joined export of Audits with associated NCs.
   - Filters: CSV `audit_id`, `status`, `severity`.
 - `GET /dashboard` — static dashboard with KPIs and overdue NCs.
+ - `GET /v1/assessments` — envelope pagination `{ items, total, limit, offset }` (legacy routes still supported; more v1 routes to come).
+ - Evidence (S3 pre‑signed):
+   - `POST /attachments/presign_upload` — get pre‑signed PUT URL (editor role; rate‑limited).
+   - `POST /attachments/complete` — record uploaded object metadata (editor role).
+   - `GET /attachments/{attachment_id}/download_url` — pre‑signed GET URL when stored in object storage.
+   - Dev file uploads still supported via `POST /assessments/{id}/attachments` and `GET /attachments/{id}/download`.
   - Interactive filters: date range and severity; renders a simple trend chart.
 
 Pagination
@@ -97,12 +103,20 @@ Production Notes
 - Logging: Structured JSON logs to stdout, include `X-Request-ID`, method, path, status, duration_ms, user-agent, and client IP.
 - Harden CORS and auth (e.g., SSO/OIDC) before exposing publicly.
 - Backups for the DB and evidence attachments (to be added if we manage files).
+ - Prod Compose: `infrastructure/compose.prod.yaml` uses Postgres and MinIO. Copy `infrastructure/.env.example` to `.env` and configure secrets.
+ - Auto-migrations: the container entrypoint runs `alembic upgrade head` on start.
+ - Org scoping: in dev you can set `X-Org-ID` header; in prod derive org from JWT claims.
+ - Rate limits: uploads/presign/exports are lightly rate‑limited; body size capped by `MAX_UPLOAD_MB`.
+ - Tracing (optional): set `OTEL_ENABLED=true` and (optionally) `OTEL_EXPORTER_OTLP_ENDPOINT` to emit traces.
 
 Migrations (Alembic)
 - Configure DB: `export DATABASE_URL=sqlite:////absolute/path/to/app.db` (or Postgres URL)
 - Upgrade: `alembic -c backend/alembic.ini upgrade head`
 - In Docker: `docker compose exec backend alembic -c backend/alembic.ini upgrade head`
- - Includes initial tables and follow-up migrations for `audits`, `nonconformities`, and `management_reviews`.
+- Includes initial tables and follow-up migrations for `audits`, `nonconformities`, and `management_reviews`.
+ - Additional migration adds:
+   - `organizations` table.
+   - `org_id`, `created_by`, `updated_by`, `request_id` on business tables, plus helpful indices.
 
 Environment Variables
 - `DATABASE_URL`: SQLAlchemy URL (SQLite or Postgres). Examples:
@@ -115,6 +129,30 @@ Environment Variables
 - `OIDC_AUDIENCE`: Optional audience claim to validate.
 - `API_ROLE`: Role used when `API_TOKEN` is active (`viewer`|`editor`|`admin`, default `admin`).
 - `LOG_LEVEL`: Logging level (default `INFO`).
+ - `DEFAULT_ORG_ID`: Optional default org id for dev scoping (header `X-Org-ID` overrides).
+ - Object store (S3/MinIO):
+   - `OBJECT_STORE_ENDPOINT` (e.g., `http://minio:9000`)
+   - `OBJECT_STORE_BUCKET`
+   - `OBJECT_STORE_ACCESS_KEY`
+   - `OBJECT_STORE_SECRET_KEY`
+   - `OBJECT_STORE_USE_PATH_STYLE` (`true`/`false`)
+ - Upload limits: `MAX_UPLOAD_MB` (default `25`).
+ - OpenTelemetry:
+   - `OTEL_ENABLED` (`true`/`false`)
+   - `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g., `http://otel-collector:4318`)
+
+Org Scoping
+- Dev: provide `X-Org-ID` header; queries are filtered by `org_id` and writes store it alongside `created_by`, `updated_by`, and `request_id`.
+- Prod: derive org id from JWT claims (recommended); header is for dev/testing only.
+
+Metrics
+- Prometheus `/metrics` includes:
+  - `http_requests_total`
+  - `http_requests_errors_total`
+  - `http_request_duration_seconds{method,route,status}`
+
+CI
+- GitHub Actions workflow at `.github/workflows/ci.yml` runs lint, type-checks, tests, and Docker build on push/PR.
  - `OIDC_JWKS`: Inline JWKS JSON string for RS256 verification.
  - `OIDC_JWKS_PATH`: Filesystem path to JWKS JSON.
  - `OIDC_JWKS_URL`: JWKS URL (requires network access).
