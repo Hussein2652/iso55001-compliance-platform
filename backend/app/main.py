@@ -27,6 +27,34 @@ from enum import Enum
 import csv
 import io
 from io import BytesIO
+from fastapi import APIRouter
+import re
+from typing import Dict
+
+
+# --- S3/MinIO client helper ---
+def _get_s3_client():
+    endpoint = os.getenv("OBJECT_STORE_ENDPOINT")
+    bucket = os.getenv("OBJECT_STORE_BUCKET")
+    access = os.getenv("OBJECT_STORE_ACCESS_KEY")
+    secret = os.getenv("OBJECT_STORE_SECRET_KEY")
+    if not (endpoint and bucket and access and secret):
+        return None, None
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        use_path = os.getenv("OBJECT_STORE_USE_PATH_STYLE", "true").lower() in ("1", "true", "yes")
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access,
+            aws_secret_access_key=secret,
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
+            config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path" if use_path else "virtual"}),
+        )
+        return client, bucket
+    except Exception:
+        return None, None
 import uuid
 import shutil
 
@@ -212,6 +240,28 @@ class Attachment(BaseModel):
     created_at: str
 
 
+class PresignRequest(BaseModel):
+    assessment_id: int
+    filename: str
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+
+
+class PresignResponse(BaseModel):
+    upload_url: str
+    object_key: str
+    headers: Dict[str, str] = {}
+
+
+class AttachmentComplete(BaseModel):
+    assessment_id: int
+    object_key: str
+    filename: str
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+    sha256: Optional[str] = None
+
+
 class AuditStatus(str, Enum):
     Planned = "Planned"
     InProgress = "InProgress"
@@ -359,6 +409,29 @@ def dashboard():
     if not index.exists():
         raise HTTPException(status_code=404, detail="Dashboard not available")
     return FileResponse(str(index))
+
+
+# --- OpenTelemetry (optional) ---
+if os.getenv("OTEL_ENABLED", "false").lower() in ("1", "true", "yes"):
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+        resource = Resource(attributes={"service.name": "iso55001-backend"})
+        provider = TracerProvider(resource=resource)
+        endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+        exporter = OTLPSpanExporter(endpoint=endpoint) if endpoint else OTLPSpanExporter()
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        FastAPIInstrumentor.instrument_app(app)
+        SQLAlchemyInstrumentor().instrument(engine=engine)
+    except Exception:
+        pass
 
 # --- Request ID + metrics middleware ---
 if 'REQUEST_COUNT' not in globals():
@@ -597,7 +670,6 @@ def list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0, resp
     base += " ORDER BY clause_id LIMIT :limit OFFSET :offset"
     params.update({"limit": limit, "offset": offset})
     with engine.connect() as conn:
-        # total
         total = conn.execute(text(
             ("SELECT COUNT(*) FROM clauses WHERE clause_id LIKE :q OR title LIKE :q OR summary LIKE :q") if q else ("SELECT COUNT(*) FROM clauses")
         ), params if q else {}).scalar_one()
@@ -605,6 +677,48 @@ def list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0, resp
     if response is not None:
         response.headers["X-Total-Count"] = str(int(total or 0))
     return [Clause(**dict(r)) for r in rows]
+
+
+# --- v1 envelope endpoints (non-breaking; legacy endpoints remain) ---
+router_v1 = APIRouter(prefix="/v1")
+
+
+@router_v1.get("/assessments")
+def v1_list_assessments(
+    clause_id: Optional[str] = None,
+    status: Optional[StatusEnum] = None,
+    limit: int = 50,
+    offset: int = 0,
+    request: Request = None,
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    base = "SELECT * FROM assessments"
+    filters = []
+    params = {}
+    if clause_id:
+        filters.append("clause_id = :cid")
+        params["cid"] = clause_id
+    if status:
+        filters.append("status = :status")
+        params["status"] = status.value if isinstance(status, StatusEnum) else status
+    org_id = getattr(request.state, "org_id", None) if request else None
+    if org_id:
+        filters.append("org_id = :org_id")
+        params["org_id"] = org_id
+    if filters:
+        base += " WHERE " + " AND ".join(filters)
+    base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    params.update({"limit": limit, "offset": offset})
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM assessments" + (" WHERE " + " AND ".join(filters) if filters else "")), params).scalar_one()
+        rows = conn.execute(text(base), params).mappings().all()
+    return {"items": [_row_to_assessment(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+
+
+app.include_router(router_v1)
 
 
 @app.get("/clauses/{clause_id}", response_model=Clause)
@@ -683,6 +797,7 @@ def list_assessments(
     limit: int = 50,
     offset: int = 0,
     response: Response = None,
+    request: Request = None,
 ):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
@@ -711,10 +826,16 @@ def list_assessments(
 
 
 @app.get("/assessments/{assessment_id}", response_model=Assessment)
-def get_assessment(assessment_id: int):
+def get_assessment(assessment_id: int, request: Request = None):
     with engine.connect() as conn:
+        params = {"id": assessment_id}
+        where = "id = :id"
+        org_id = getattr(request.state, "org_id", None) if request else None
+        if org_id:
+            where += " AND org_id = :org_id"
+            params["org_id"] = org_id
         row = conn.execute(
-            text("SELECT * FROM assessments WHERE id = :id"), {"id": assessment_id}
+            text(f"SELECT * FROM assessments WHERE {where}"), params
         ).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Assessment not found")
@@ -801,16 +922,22 @@ def upload_attachment(assessment_id: int, request: Request, file: UploadFile = F
 
 
 @app.get("/assessments/{assessment_id}/attachments", response_model=List[Attachment])
-def list_attachments(assessment_id: int, response: Response = None):
+def list_attachments(assessment_id: int, response: Response = None, request: Request = None):
     with engine.connect() as conn:
         exists = conn.execute(text("SELECT 1 FROM assessments WHERE id = :id"), {"id": assessment_id}).first()
         if not exists:
             raise HTTPException(status_code=404, detail="Assessment not found")
+        params = {"id": assessment_id}
+        where = "assessment_id = :id"
+        org_id = getattr(request.state, "org_id", None) if request else None
+        if org_id:
+            where += " AND org_id = :org_id"
+            params["org_id"] = org_id
         rows = conn.execute(
-            text("SELECT id, assessment_id, filename, content_type, size, created_at FROM attachments WHERE assessment_id = :id ORDER BY created_at DESC, id DESC"),
-            {"id": assessment_id},
+            text(f"SELECT id, assessment_id, filename, content_type, size, created_at FROM attachments WHERE {where} ORDER BY created_at DESC, id DESC"),
+            params,
         ).mappings().all()
-        total = conn.execute(text("SELECT COUNT(*) FROM attachments WHERE assessment_id = :id"), {"id": assessment_id}).scalar_one()
+        total = conn.execute(text(f"SELECT COUNT(*) FROM attachments WHERE {where}"), params).scalar_one()
     if response is not None:
         response.headers["X-Total-Count"] = str(int(total or 0))
     return [Attachment(**dict(r)) for r in rows]
@@ -845,6 +972,94 @@ def delete_attachment(attachment_id: int, _auth=Depends(role_required("admin")))
     except Exception:
         pass
     return {}
+
+
+@app.post("/attachments/presign_upload", response_model=PresignResponse)
+def presign_upload(payload: PresignRequest, request: Request, _auth=Depends(role_required("editor"))):
+    # Rate limit
+    rate_limit(f"presign:{request.client.host if request.client else 'local'}")
+    client, bucket = _get_s3_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="Object store not configured")
+    # Basic sanitization
+    fname = re.sub(r"[^A-Za-z0-9_.-]", "_", payload.filename)
+    org_id = getattr(request.state, "org_id", "public") or "public"
+    key = f"{org_id}/assessments/{payload.assessment_id}/{uuid.uuid4().hex}_{fname}"
+    params = {"Bucket": bucket, "Key": key}
+    if payload.content_type:
+        params["ContentType"] = payload.content_type
+    url = client.generate_presigned_url(
+        "put_object", Params=params, ExpiresIn=900
+    )
+    headers = {}
+    if payload.content_type:
+        headers["Content-Type"] = payload.content_type
+    return PresignResponse(upload_url=url, object_key=key, headers=headers)
+
+
+@app.post("/attachments/complete", response_model=Attachment, status_code=201)
+def complete_attachment(payload: AttachmentComplete, request: Request, _auth=Depends(role_required("editor"))):
+    # Record the attachment metadata pointing to object storage
+    now = datetime.utcnow().isoformat()
+    stored_path = f"s3://{os.getenv('OBJECT_STORE_BUCKET','')}/{payload.object_key}"
+    with engine.begin() as conn:
+        res = conn.execute(
+            text(
+                """
+                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id)
+                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id)
+                RETURNING id
+                """
+                if not DEFAULT_DB_URL.startswith("sqlite")
+                else """
+                INSERT INTO attachments (assessment_id, filename, content_type, size, stored_path, created_at, org_id, created_by, request_id)
+                VALUES (:aid, :filename, :content_type, :size, :stored_path, :created_at, :org_id, :created_by, :request_id)
+                """
+            ),
+            {
+                "aid": payload.assessment_id,
+                "filename": payload.filename,
+                "content_type": payload.content_type,
+                "size": payload.size,
+                "stored_path": stored_path,
+                "created_at": now,
+                "org_id": getattr(request.state, "org_id", None),
+                "created_by": (_auth or {}).get("sub"),
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
+        if DEFAULT_DB_URL.startswith("sqlite"):
+            att_id = conn.execute(text("SELECT last_insert_rowid()")).scalar_one()
+        else:
+            att_id = res.scalar_one()
+        row = conn.execute(text("SELECT id, assessment_id, filename, content_type, size, created_at FROM attachments WHERE id = :id"), {"id": att_id}).mappings().first()
+    return Attachment(**dict(row))
+
+
+@app.get("/attachments/{attachment_id}/download_url")
+def get_attachment_download_url(attachment_id: int):
+    client, bucket = _get_s3_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="Object store not configured")
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT filename, stored_path, content_type FROM attachments WHERE id = :id"), {"id": attachment_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    stored = row["stored_path"] or ""
+    if not stored.startswith("s3://"):
+        raise HTTPException(status_code=400, detail="Attachment is file-based; use /attachments/{id}/download")
+    # parse key
+    prefix = f"s3://{bucket}/"
+    key = stored[len("s3://"):]
+    # When bucket is included in stored_path, remove it
+    if key.startswith(f"{bucket}/"):
+        key = key[len(f"{bucket}/"):]
+    url = client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=900,
+    )
+    return {"url": url}
 
 
 @app.patch("/assessments/{assessment_id}", response_model=Assessment)
@@ -926,7 +1141,7 @@ def create_audit(payload: AuditCreate, request: Request, _auth=Depends(role_requ
 
 
 @app.get("/audits", response_model=List[Audit])
-def list_audits(status: Optional[AuditStatus] = None, limit: int = 50, offset: int = 0, response: Response = None):
+def list_audits(status: Optional[AuditStatus] = None, limit: int = 50, offset: int = 0, response: Response = None, request: Request = None):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
     if offset < 0:
@@ -936,10 +1151,17 @@ def list_audits(status: Optional[AuditStatus] = None, limit: int = 50, offset: i
     if status:
         base += " WHERE status = :status"
         params["status"] = status.value if isinstance(status, AuditStatus) else status
+    # org scope
+    org_id = getattr(request.state, "org_id", None) if request else None
+    if org_id:
+        base += (" WHERE " if " WHERE " not in base else " AND ") + " org_id = :org_id"
+        params["org_id"] = org_id
     base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
     params.update({"limit": limit, "offset": offset})
     with engine.connect() as conn:
         count_sql = "SELECT COUNT(*) FROM audits" + (" WHERE status = :status" if status else "")
+        if org_id:
+            count_sql += (" WHERE " if " WHERE " not in count_sql else " AND ") + " org_id = :org_id"
         total = conn.execute(text(count_sql), params).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
     if response is not None:
@@ -1057,6 +1279,7 @@ def list_nonconformities(
     limit: int = 50,
     offset: int = 0,
     response: Response = None,
+    request: Request = None,
 ):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
@@ -1079,6 +1302,10 @@ def list_nonconformities(
         params["aid"] = audit_id
     if filters:
         base += " WHERE " + " AND ".join(filters)
+    org_id = getattr(request.state, "org_id", None) if request else None
+    if org_id:
+        filters.append("org_id = :org_id")
+        params["org_id"] = org_id
     base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
     params.update({"limit": limit, "offset": offset})
     with engine.connect() as conn:
@@ -1267,7 +1494,8 @@ def _rows_to_csv(rows, headers):
 
 
 @app.get("/export/audits.csv")
-def export_audits_csv(status: Optional[AuditStatus] = None, scheduled_from: Optional[date] = None, scheduled_to: Optional[date] = None, completed_from: Optional[date] = None, completed_to: Optional[date] = None):
+def export_audits_csv(status: Optional[AuditStatus] = None, scheduled_from: Optional[date] = None, scheduled_to: Optional[date] = None, completed_from: Optional[date] = None, completed_to: Optional[date] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     base = "SELECT id, title, description, status, scheduled_date, completed_date, created_at, updated_at FROM audits"
     filters = []
     params: dict = {}
@@ -1297,7 +1525,8 @@ def export_audits_csv(status: Optional[AuditStatus] = None, scheduled_from: Opti
 
 
 @app.get("/export/nonconformities.csv")
-def export_ncs_csv(status: Optional[NCStatusEnum] = None, severity: Optional[SeverityEnum] = None, clause_id: Optional[str] = None, audit_id: Optional[int] = None, created_from: Optional[date] = None, created_to: Optional[date] = None, due_from: Optional[date] = None, due_to: Optional[date] = None):
+def export_ncs_csv(status: Optional[NCStatusEnum] = None, severity: Optional[SeverityEnum] = None, clause_id: Optional[str] = None, audit_id: Optional[int] = None, created_from: Optional[date] = None, created_to: Optional[date] = None, due_from: Optional[date] = None, due_to: Optional[date] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     base = "SELECT id, audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, closed_date, created_at, updated_at FROM nonconformities"
     filters = []
     params: dict = {}
@@ -1336,7 +1565,8 @@ def export_ncs_csv(status: Optional[NCStatusEnum] = None, severity: Optional[Sev
 
 
 @app.get("/export/audits.xlsx")
-def export_audits_xlsx(status: Optional[AuditStatus] = None):
+def export_audits_xlsx(status: Optional[AuditStatus] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     from openpyxl import Workbook
 
     base = "SELECT id, title, description, status, scheduled_date, completed_date, created_at, updated_at FROM audits"
@@ -1361,7 +1591,8 @@ def export_audits_xlsx(status: Optional[AuditStatus] = None):
 
 
 @app.get("/export/nonconformities.xlsx")
-def export_ncs_xlsx(status: Optional[NCStatusEnum] = None, severity: Optional[SeverityEnum] = None):
+def export_ncs_xlsx(status: Optional[NCStatusEnum] = None, severity: Optional[SeverityEnum] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     from openpyxl import Workbook
 
     base = "SELECT id, audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, closed_date, created_at, updated_at FROM nonconformities"
@@ -1392,7 +1623,8 @@ def export_ncs_xlsx(status: Optional[NCStatusEnum] = None, severity: Optional[Se
 
 
 @app.get("/export/assessments.csv")
-def export_assessments_csv(clause_id: Optional[str] = None, status: Optional[StatusEnum] = None, owner: Optional[str] = None, created_from: Optional[date] = None, created_to: Optional[date] = None, due_from: Optional[date] = None, due_to: Optional[date] = None):
+def export_assessments_csv(clause_id: Optional[str] = None, status: Optional[StatusEnum] = None, owner: Optional[str] = None, created_from: Optional[date] = None, created_to: Optional[date] = None, due_from: Optional[date] = None, due_to: Optional[date] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     base = "SELECT id, clause_id, status, evidence, owner, due_date, created_at, updated_at FROM assessments"
     filters = []
     params: dict = {}
@@ -1427,7 +1659,8 @@ def export_assessments_csv(clause_id: Optional[str] = None, status: Optional[Sta
 
 
 @app.get("/export/assessments.xlsx")
-def export_assessments_xlsx(status: Optional[StatusEnum] = None):
+def export_assessments_xlsx(status: Optional[StatusEnum] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     from openpyxl import Workbook
     base = "SELECT id, clause_id, status, evidence, owner, due_date, created_at, updated_at FROM assessments"
     params: dict = {}
@@ -1451,7 +1684,8 @@ def export_assessments_xlsx(status: Optional[StatusEnum] = None):
 
 
 @app.get("/export/audit_nonconformities.csv")
-def export_audit_nc_csv(status: Optional[NCStatusEnum] = None, severity: Optional[SeverityEnum] = None, audit_id: Optional[int] = None):
+def export_audit_nc_csv(status: Optional[NCStatusEnum] = None, severity: Optional[SeverityEnum] = None, audit_id: Optional[int] = None, request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     base = """
     SELECT a.id as audit_id, a.title as audit_title, n.id as nc_id, n.severity, n.status, n.description, n.owner, n.due_date, n.closed_date, n.created_at
     FROM audits a LEFT JOIN nonconformities n ON n.audit_id = a.id
@@ -1478,7 +1712,8 @@ def export_audit_nc_csv(status: Optional[NCStatusEnum] = None, severity: Optiona
 
 
 @app.get("/export/audit_nonconformities.xlsx")
-def export_audit_nc_xlsx():
+def export_audit_nc_xlsx(request: Request = None):
+    rate_limit(f"export:{request.client.host if request and request.client else 'local'}")
     from openpyxl import Workbook
     with engine.connect() as conn:
         rows = conn.execute(text(
@@ -1501,3 +1736,8 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    # org scoping (dev only if org present)
+    org_id = getattr(request.state, "org_id", None) if 'request' in locals() else None
+    if org_id:
+        filters.append("org_id = :org_id")
+        params["org_id"] = org_id
