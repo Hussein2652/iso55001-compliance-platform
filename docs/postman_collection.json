@@ -95,11 +95,55 @@
           "path": ["kpi", "overview"]
         }
       }
+    },
+    {
+      "name": "Organizations",
+      "item": [
+        {
+          "name": "Create Org (admin)",
+          "request": {
+            "method": "POST",
+            "header": [ {"key":"Authorization","value":"Bearer {{token}}"} ],
+            "body": {"mode":"raw","raw":"{\n  \"id\": \"orgA\",\n  \"name\": \"Org A\"\n}"},
+            "url": {"raw":"{{baseUrl}}/v1/orgs","host":["{{baseUrl}}"],"path":["v1","orgs"]}
+          }
+        },
+        {
+          "name": "List Orgs",
+          "request": {"method":"GET","header":[{"key":"Authorization","value":"Bearer {{token}}"}],"url":{"raw":"{{baseUrl}}/v1/orgs?limit=20&offset=0","host":["{{baseUrl}}"],"path":["v1","orgs"],"query":[{"key":"limit","value":"20"},{"key":"offset","value":"0"}]}}
+        }
+      ]
+    },
+    {
+      "name": "V1 Audits",
+      "request": {"method":"GET","header":[],"url":{"raw":"{{baseUrl}}/v1/audits?limit=20&offset=0","host":["{{baseUrl}}"],"path":["v1","audits"],"query":[{"key":"limit","value":"20"},{"key":"offset","value":"0"}]}}
+    },
+    {
+      "name": "V1 Nonconformities",
+      "request": {"method":"GET","header":[],"url":{"raw":"{{baseUrl}}/v1/nonconformities?limit=20&offset=0","host":["{{baseUrl}}"],"path":["v1","nonconformities"],"query":[{"key":"limit","value":"20"},{"key":"offset","value":"0"}]}}
+    },
+    {
+      "name": "V1 Management Reviews",
+      "request": {"method":"GET","header":[],"url":{"raw":"{{baseUrl}}/v1/management-reviews?limit=20&offset=0","host":["{{baseUrl}}"],"path":["v1","management-reviews"],"query":[{"key":"limit","value":"20"},{"key":"offset","value":"0"}]}}
+    },
+    {
+      "name": "Attachments (S3 presign)",
+      "item": [
+        {"name":"Presign Upload","request":{"method":"POST","header":[{"key":"Authorization","value":"Bearer {{token}}"},{"key":"Content-Type","value":"application/json"}],"body":{"mode":"raw","raw":"{\n  \"assessment_id\": 1,\n  \"filename\": \"evidence.pdf\",\n  \"content_type\": \"application/pdf\",\n  \"size\": 1048576\n}"},"url":{"raw":"{{baseUrl}}/attachments/presign_upload","host":["{{baseUrl}}"],"path":["attachments","presign_upload"]}}},
+        {"name":"Complete Attachment","request":{"method":"POST","header":[{"key":"Authorization","value":"Bearer {{token}}"},{"key":"Content-Type","value":"application/json"}],"body":{"mode":"raw","raw":"{\n  \"assessment_id\": 1,\n  \"object_key\": \"orgA/assessments/1/abc123_evidence.pdf\",\n  \"filename\": \"evidence.pdf\",\n  \"content_type\": \"application/pdf\",\n  \"size\": 1048576\n}"},"url":{"raw":"{{baseUrl}}/attachments/complete","host":["{{baseUrl}}"],"path":["attachments","complete"]}}}
+      ]
+    },
+    {
+      "name": "Exports",
+      "item": [
+        {"name":"Audits CSV","request":{"method":"GET","header":[],"url":{"raw":"{{baseUrl}}/export/audits.csv","host":["{{baseUrl}}"],"path":["export","audits.csv"]}}},
+        {"name":"NCs CSV","request":{"method":"GET","header":[],"url":{"raw":"{{baseUrl}}/export/nonconformities.csv","host":["{{baseUrl}}"],"path":["export","nonconformities.csv"]}}}
+      ]
     }
   ],
   "variable": [
     {"key": "baseUrl", "value": "http://localhost:8000"},
-    {"key": "token", "value": "devtoken"}
+    {"key": "token", "value": "devtoken"},
+    {"key": "orgId", "value": "orgA"}
   ]
 }
-
