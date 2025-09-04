@@ -225,6 +225,13 @@ class AssessmentCreate(BaseModel):
     evidence: Optional[str] = None
     owner: Optional[str] = None
     due_date: Optional[date] = Field(None, description="ISO date, e.g., 2025-03-31")
+    model_config = {"json_schema_extra": {"examples": [{
+        "clause_id": "4.1",
+        "status": "Compliant",
+        "evidence": "Context analysis documented in POL-001",
+        "owner": "QA",
+        "due_date": "2025-12-31"
+    }]}}
 
 
 class AssessmentUpdate(BaseModel):
@@ -232,6 +239,7 @@ class AssessmentUpdate(BaseModel):
     evidence: Optional[str] = None
     owner: Optional[str] = None
     due_date: Optional[date] = None
+    model_config = {"json_schema_extra": {"examples": [{"status": "Partial", "owner": "Ops"}]}}
 
 
 class Assessment(BaseModel):
@@ -259,6 +267,7 @@ class PresignRequest(BaseModel):
     filename: str
     content_type: Optional[str] = None
     size: Optional[int] = None
+    model_config = {"json_schema_extra": {"examples": [{"assessment_id": 1, "filename": "evidence.pdf", "content_type": "application/pdf", "size": 1048576}]}}
 
 
 class PresignResponse(BaseModel):
@@ -277,6 +286,7 @@ class AttachmentComplete(BaseModel):
     retention_hold: Optional[bool] = None
     retention_until: Optional[date] = None
     disposition: Optional[str] = None
+    model_config = {"json_schema_extra": {"examples": [{"assessment_id": 1, "object_key": "orgA/assessments/1/abc123_evidence.pdf", "filename": "evidence.pdf", "content_type": "application/pdf", "size": 1048576, "sha256": "..."}]}}
 
 
 # --- API helpers ---
@@ -320,6 +330,7 @@ class AuditCreate(BaseModel):
     description: Optional[str] = None
     status: AuditStatus = AuditStatus.Planned
     scheduled_date: Optional[date] = None
+    model_config = {"json_schema_extra": {"examples": [{"title": "Internal audit Q1", "status": "Planned", "scheduled_date": "2025-01-15"}]}}
 
 
 class AuditUpdate(BaseModel):
@@ -328,6 +339,7 @@ class AuditUpdate(BaseModel):
     status: Optional[AuditStatus] = None
     scheduled_date: Optional[date] = None
     completed_date: Optional[date] = None
+    model_config = {"json_schema_extra": {"examples": [{"status": "InProgress"}]}}
 
 
 class Audit(BaseModel):
@@ -362,6 +374,15 @@ class NonconformityCreate(BaseModel):
     corrective_action: Optional[str] = None
     owner: Optional[str] = None
     due_date: Optional[date] = None
+    model_config = {"json_schema_extra": {"examples": [{
+        "description": "Policy not documented",
+        "severity": "Major",
+        "status": "Open",
+        "audit_id": 1,
+        "clause_id": "4.1",
+        "owner": "QA",
+        "due_date": "2025-02-28"
+    }]}}
 
 
 class NonconformityUpdate(BaseModel):
@@ -374,6 +395,7 @@ class NonconformityUpdate(BaseModel):
     owner: Optional[str] = None
     due_date: Optional[date] = None
     closed_date: Optional[date] = None
+    model_config = {"json_schema_extra": {"examples": [{"status": "Closed", "closed_date": "2025-03-01"}]}}
 
 
 class Nonconformity(BaseModel):
@@ -400,6 +422,14 @@ class ManagementReviewCreate(BaseModel):
     summary: Optional[str] = None
     decisions: Optional[str] = None
     actions: Optional[str] = None
+    model_config = {"json_schema_extra": {"examples": [{
+        "title": "Q1 Review",
+        "period_start": "2025-01-01",
+        "period_end": "2025-03-31",
+        "meeting_date": "2025-04-10",
+        "participants": "CEO, COO",
+        "summary": "Good progress"
+    }]}}
 
 
 class ManagementReviewUpdate(BaseModel):
@@ -411,6 +441,7 @@ class ManagementReviewUpdate(BaseModel):
     summary: Optional[str] = None
     decisions: Optional[str] = None
     actions: Optional[str] = None
+    model_config = {"json_schema_extra": {"examples": [{"decisions": "Allocate budget"}]}}
 
 
 class ManagementReview(BaseModel):
@@ -444,7 +475,27 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="ISO 55001 Compliance API", version="0.1.0", lifespan=lifespan)
+openapi_tags = [
+    {"name": "Health", "description": "Service status and metrics"},
+    {"name": "Clauses", "description": "ISO 55001 clauses catalog"},
+    {"name": "Assessments", "description": "Clause assessment records"},
+    {"name": "Audits", "description": "Audit program and findings"},
+    {"name": "Nonconformities", "description": "NC/CAPA workflows"},
+    {"name": "Management Reviews", "description": "9.3 management review records"},
+    {"name": "Attachments", "description": "Evidence uploads and links"},
+    {"name": "KPIs", "description": "Performance metrics and trends"},
+    {"name": "Exports", "description": "CSV/XLSX exports"},
+    {"name": "Organizations", "description": "Tenant management (admin)"},
+    {"name": "Setup", "description": "Admin bootstrap utilities"},
+]
+
+app = FastAPI(
+    title="ISO 55001 Compliance API",
+    version="0.1.0",
+    description="API for ISO 55001 readiness and compliance: clauses, assessments, audits, NCs, reviews, KPIs, and evidence.",
+    lifespan=lifespan,
+    openapi_tags=openapi_tags,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=(os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",") if os.getenv("CORS_ALLOWED_ORIGINS") else ["*"]),
@@ -602,7 +653,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/metrics")
+@app.get("/metrics", tags=["Health"])
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
