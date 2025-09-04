@@ -102,7 +102,8 @@ API (high level)
    - `POST /attachments/complete` — record uploaded object metadata (editor role).
    - `GET /attachments/{attachment_id}/download_url` — pre‑signed GET URL when stored in object storage.
    - Dev file uploads still supported via `POST /assessments/{id}/attachments` and `GET /attachments/{id}/download`.
- - `POST /setup` — admin-only idempotent setup: creates default org (if `DEFAULT_ORG_ID` is set) and seeds clauses when empty.
+- `POST /setup` — admin-only idempotent setup: creates default org (if `DEFAULT_ORG_ID` is set) and seeds clauses when empty.
+   - Optional body: `{ run_migrations: true, reseed_clauses: false, verify_object_store: true }`.
   - Interactive filters: date range and severity; renders a simple trend chart.
 
 Pagination
@@ -242,6 +243,7 @@ Docs & Ops
 
 CI
 - GitHub Actions workflow at `.github/workflows/ci.yml` runs lint, type-checks, tests, and Docker build on push/PR.
+ - Integration job spins up Postgres and runs an Alembic smoke test.
 
 Tools
 - Insomnia collection: see `docs/insomnia_export.json`. Import and set `baseUrl` and `token` in the environment.

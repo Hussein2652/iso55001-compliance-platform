@@ -30,6 +30,7 @@ import csv
 import io
 from io import BytesIO
 from fastapi import APIRouter
+import subprocess
 import re
 from typing import Dict
 
@@ -1003,9 +1004,27 @@ app.include_router(router_v1)
 
 
 # --- Setup (admin) ---
-@app.post("/setup")
-def setup(request: Request, _auth=Depends(role_required("admin"))):
+class SetupRequest(BaseModel):
+    run_migrations: Optional[bool] = True
+    reseed_clauses: Optional[bool] = False
+    verify_object_store: Optional[bool] = True
+
+
+@app.post("/setup", tags=["Setup"], responses={400:{"model":ErrorResponse},401:{"model":ErrorResponse},403:{"model":ErrorResponse}})
+def setup(request: Request, payload: Optional[SetupRequest] = None, _auth=Depends(role_required("admin"))):
     actions = []
+    payload = payload or SetupRequest()
+    # Optionally run Alembic migrations
+    if payload.run_migrations:
+        try:
+            env = os.environ.copy()
+            # Ensure DATABASE_URL propagates to alembic
+            subprocess.run([
+                "alembic", "-c", str(ROOT_DIR / "backend" / "alembic.ini"), "upgrade", "head"
+            ], check=True, cwd=str(ROOT_DIR), env=env)
+            actions.append("migrated")
+        except Exception as e:
+            actions.append(f"migrate_failed:{e}")
     # Ensure org exists if DEFAULT_ORG_ID set
     default_org = os.getenv("DEFAULT_ORG_ID")
     if default_org:
@@ -1018,12 +1037,26 @@ def setup(request: Request, _auth=Depends(role_required("admin"))):
                     "ts": datetime.utcnow().isoformat(),
                 })
                 actions.append(f"created_org:{default_org}")
-    # Seed clauses if empty
-    with engine.connect() as conn:
+    # Seed clauses
+    with engine.begin() as conn:
         cnt = conn.execute(text("SELECT COUNT(1) FROM clauses")).scalar_one()
+        if payload.reseed_clauses:
+            conn.execute(text("DELETE FROM clauses"))
+            cnt = 0
     if not cnt:
         seed_clauses_if_empty()
         actions.append("seeded_clauses")
+    # Verify object store
+    if payload.verify_object_store:
+        try:
+            client, bucket = _get_s3_client()
+            if client and bucket:
+                client.head_bucket(Bucket=bucket)
+                actions.append("object_store_ok")
+            else:
+                actions.append("object_store_not_configured")
+        except Exception as e:
+            actions.append(f"object_store_failed:{e}")
     # Return summary
     return {"ok": True, "actions": actions}
 

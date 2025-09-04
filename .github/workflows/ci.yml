@@ -40,6 +40,36 @@ jobs:
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: iso55001
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d iso55001" \
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install deps
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Run alembic against Postgres and smoke test
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/iso55001
+        run: pytest -q -k test_pg_smoke
       - name: Ensure README updated when core changes present
         if: github.event_name == 'push' || github.event_name == 'pull_request'
         run: |
