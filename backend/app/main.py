@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from pydantic.generics import GenericModel
+from typing import TypeVar, Generic
 from sqlalchemy import (
     create_engine,
     text,
@@ -267,6 +269,20 @@ class AttachmentComplete(BaseModel):
     retention_hold: Optional[bool] = None
     retention_until: Optional[date] = None
     disposition: Optional[str] = None
+
+
+# --- API helpers ---
+class ErrorResponse(BaseModel):
+    detail: str
+
+T = TypeVar("T")
+
+
+class Envelope(GenericModel, Generic[T]):
+    items: List[T]
+    total: int
+    limit: int
+    offset: int
 
 
 class AuditStatus(str, Enum):
@@ -723,7 +739,7 @@ def list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0, resp
 router_v1 = APIRouter(prefix="/v1")
 
 
-@router_v1.get("/assessments")
+@router_v1.get("/assessments", response_model=Envelope[Assessment], tags=["Assessments"], responses={400:{"model":ErrorResponse},403:{"model":ErrorResponse}})
 def v1_list_assessments(
     clause_id: Optional[str] = None,
     status: Optional[StatusEnum] = None,
@@ -755,10 +771,10 @@ def v1_list_assessments(
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM assessments" + (" WHERE " + " AND ".join(filters) if filters else "")), params).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
-    return {"items": [_row_to_assessment(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+    return Envelope[Assessment](items=[_row_to_assessment(r) for r in rows], total=int(total or 0), limit=limit, offset=offset)
 
 
-@router_v1.get("/audits")
+@router_v1.get("/audits", response_model=Envelope[Audit], tags=["Audits"], responses={400:{"model":ErrorResponse}})
 def v1_list_audits(status: Optional[AuditStatus] = None, limit: int = 50, offset: int = 0, request: Request = None):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
@@ -778,10 +794,10 @@ def v1_list_audits(status: Optional[AuditStatus] = None, limit: int = 50, offset
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM audits" + ((" WHERE status = :status" ) if status else "") + (" WHERE org_id = :org_id" if (org_id and not status) else (" AND org_id = :org_id" if org_id else ""))), params).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
-    return {"items": [_row_to_audit(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+    return Envelope[Audit](items=[_row_to_audit(r) for r in rows], total=int(total or 0), limit=limit, offset=offset)
 
 
-@router_v1.get("/nonconformities")
+@router_v1.get("/nonconformities", response_model=Envelope[Nonconformity], tags=["Nonconformities"], responses={400:{"model":ErrorResponse}})
 def v1_list_nonconformities(
     status: Optional[NCStatusEnum] = None,
     severity: Optional[SeverityEnum] = None,
@@ -816,10 +832,10 @@ def v1_list_nonconformities(
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM nonconformities" + (" WHERE " + " AND ".join(filters) if filters else "")), params).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
-    return {"items": [_row_to_nc(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+    return Envelope[Nonconformity](items=[_row_to_nc(r) for r in rows], total=int(total or 0), limit=limit, offset=offset)
 
 
-@router_v1.get("/management-reviews")
+@router_v1.get("/management-reviews", response_model=Envelope[ManagementReview], tags=["Management Reviews"], responses={400:{"model":ErrorResponse}})
 def v1_list_management_reviews(limit: int = 50, offset: int = 0, request: Request = None):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
@@ -835,10 +851,10 @@ def v1_list_management_reviews(limit: int = 50, offset: int = 0, request: Reques
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM management_reviews" + (" WHERE org_id = :org_id" if org_id else "")), params if org_id else {}).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
-    return {"items": [_row_to_mr(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+    return Envelope[ManagementReview](items=[_row_to_mr(r) for r in rows], total=int(total or 0), limit=limit, offset=offset)
 
 
-@router_v1.get("/clauses")
+@router_v1.get("/clauses", response_model=Envelope[Clause], tags=["Clauses"], responses={400:{"model":ErrorResponse}})
 def v1_list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
@@ -852,7 +868,7 @@ def v1_list_clauses(q: Optional[str] = None, limit: int = 50, offset: int = 0):
     with engine.connect() as conn:
         total = conn.execute(text(("SELECT COUNT(*) FROM clauses WHERE clause_id LIKE :q OR title LIKE :q OR summary LIKE :q") if q else ("SELECT COUNT(*) FROM clauses")), params if q else {}).scalar_one()
         rows = conn.execute(text(base), params).mappings().all()
-    return {"items": [Clause(**dict(r)) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+    return Envelope[Clause](items=[Clause(**dict(r)) for r in rows], total=int(total or 0), limit=limit, offset=offset)
 
 
 app.include_router(router_v1)
