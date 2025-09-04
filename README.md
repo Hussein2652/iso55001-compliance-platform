@@ -107,7 +107,9 @@ Production Notes
  - Auto-migrations: the container entrypoint runs `alembic upgrade head` on start.
  - Org scoping: in dev you can set `X-Org-ID` header; in prod derive org from JWT claims.
  - Rate limits: uploads/presign/exports are lightly rate‑limited; body size capped by `MAX_UPLOAD_MB`.
- - Tracing (optional): set `OTEL_ENABLED=true` and (optionally) `OTEL_EXPORTER_OTLP_ENDPOINT` to emit traces.
+- Tracing (optional): set `OTEL_ENABLED=true` and (optionally) `OTEL_EXPORTER_OTLP_ENDPOINT` to emit traces.
+ - Security headers: HSTS (prod), `X-Content-Type-Options: nosniff`, and a conservative CSP are applied.
+ - Auth policy (prod): `ENV=prod` enforces JWT RS256 via JWKS; static `API_TOKEN`/HS256 accepted only outside prod.
 
 Migrations (Alembic)
 - Configure DB: `export DATABASE_URL=sqlite:////absolute/path/to/app.db` (or Postgres URL)
@@ -129,6 +131,8 @@ Environment Variables
 - `OIDC_AUDIENCE`: Optional audience claim to validate.
 - `API_ROLE`: Role used when `API_TOKEN` is active (`viewer`|`editor`|`admin`, default `admin`).
 - `LOG_LEVEL`: Logging level (default `INFO`).
+ - `ENV`: `dev` or `prod` (prod enforces RS256/JWKS and ignores static token).
+ - `CORS_ALLOWED_ORIGINS`: Comma-separated origins (prod should not use `*`).
  - `DEFAULT_ORG_ID`: Optional default org id for dev scoping (header `X-Org-ID` overrides).
  - Object store (S3/MinIO):
    - `OBJECT_STORE_ENDPOINT` (e.g., `http://minio:9000`)
@@ -150,6 +154,22 @@ Metrics
   - `http_requests_total`
   - `http_requests_errors_total`
   - `http_request_duration_seconds{method,route,status}`
+
+Deployment Modes
+- Dev:
+  - Static `API_TOKEN` allowed; HS256 accepted.
+  - Org scoping via `X-Org-ID` header (or `DEFAULT_ORG_ID`).
+  - CORS defaults to `*` if not set.
+- Prod:
+  - JWT RS256 required (JWKS-based); static token/HS256 disabled.
+  - Org id is derived from JWT claims; header is ignored.
+  - CORS must be explicitly configured via `CORS_ALLOWED_ORIGINS`.
+
+Fast Wins Next
+- Roll `/v1` envelope across audits, nonconformities, and reviews.
+- Add strict content-type allow-list and optional SHA-256 recording for S3 objects.
+- Enforce org match on update/delete operations.
+- Generate Insomnia/Postman collection and add `/setup` endpoint to seed clauses idempotently.
 
 CI
 - GitHub Actions workflow at `.github/workflows/ci.yml` runs lint, type-checks, tests, and Docker build on push/PR.
