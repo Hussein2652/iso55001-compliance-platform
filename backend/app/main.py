@@ -307,10 +307,12 @@ class Envelope(GenericModel, Generic[T]):
 class OrganizationCreate(BaseModel):
     id: str
     name: str
+    model_config = {"json_schema_extra": {"examples": [{"id": "orgA", "name": "Organization A"}]}}
 
 
 class OrganizationUpdate(BaseModel):
     name: Optional[str] = None
+    model_config = {"json_schema_extra": {"examples": [{"name": "Organization A (Renamed)"}]}}
 
 
 class Organization(BaseModel):
@@ -1073,7 +1075,27 @@ def get_clause(clause_id: str):
     return Clause(**dict(row))
 
 
-@app.post("/assessments", response_model=Assessment, status_code=201)
+@app.post(
+    "/assessments",
+    response_model=Assessment,
+    status_code=201,
+    tags=["Assessments"],
+    responses={400:{"model":ErrorResponse},401:{"model":ErrorResponse},403:{"model":ErrorResponse}},
+    openapi_extra={
+        "x-codeSamples": [
+            {
+                "lang": "cURL",
+                "label": "curl",
+                "source": "curl -X POST '{{baseUrl}}/assessments' -H 'Content-Type: application/json' -H 'Authorization: Bearer {{token}}' -d '{\\n  \"clause_id\": \"4.1\",\\n  \"status\": \"Compliant\"\\n}'"
+            },
+            {
+                "lang": "Python",
+                "label": "requests",
+                "source": "import requests\nrequests.post(f'{baseUrl}/assessments', headers={'Authorization': f'Bearer {token}'}, json={'clause_id':'4.1','status':'Compliant'}).json()"
+            }
+        ]
+    }
+)
 def create_assessment(payload: AssessmentCreate, request: Request, _auth=Depends(role_required("editor"))):
     # Ensure clause exists
     with engine.connect() as conn:
@@ -1204,7 +1226,18 @@ def rate_limit(key: str, limit: int = 30, window_sec: int = 60):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
 
-@app.post("/assessments/{assessment_id}/attachments", response_model=Attachment, status_code=201)
+@app.post(
+    "/assessments/{assessment_id}/attachments",
+    response_model=Attachment,
+    status_code=201,
+    tags=["Attachments"],
+    responses={400:{"model":ErrorResponse},401:{"model":ErrorResponse},403:{"model":ErrorResponse},413:{"model":ErrorResponse},429:{"model":ErrorResponse}},
+    openapi_extra={
+        "x-codeSamples": [
+            {"lang":"cURL","label":"curl (multipart)","source":"curl -X POST '{{baseUrl}}/assessments/1/attachments' -H 'Authorization: Bearer {{token}}' -F 'file=@evidence.pdf;type=application/pdf'"}
+        ]
+    }
+)
 def upload_attachment(assessment_id: int, request: Request, file: UploadFile = File(...), _auth=Depends(role_required("editor"))):
     # Rate limit and size check
     rate_limit(f"upload:{request.client.host if request.client else 'local'}")
@@ -1318,7 +1351,17 @@ def delete_attachment(attachment_id: int, request: Request, _auth=Depends(role_r
     return {}
 
 
-@app.post("/attachments/presign_upload", response_model=PresignResponse)
+@app.post(
+    "/attachments/presign_upload",
+    response_model=PresignResponse,
+    tags=["Attachments"],
+    responses={400:{"model":ErrorResponse},401:{"model":ErrorResponse},403:{"model":ErrorResponse},429:{"model":ErrorResponse}},
+    openapi_extra={
+        "x-codeSamples": [
+            {"lang":"cURL","label":"curl","source":"curl -X POST '{{baseUrl}}/attachments/presign_upload' -H 'Authorization: Bearer {{token}}' -H 'Content-Type: application/json' -d '{\\n  \\\"assessment_id\\\": 1,\\n  \\\"filename\\\": \\\"evidence.pdf\\\",\\n  \\\"content_type\\\": \\\"application/pdf\\\",\\n  \\\"size\\\": 1048576\\n}'"}
+        ]
+    }
+)
 def presign_upload(payload: PresignRequest, request: Request, _auth=Depends(role_required("editor"))):
     # Rate limit
     rate_limit(f"presign:{request.client.host if request.client else 'local'}")
@@ -1351,7 +1394,18 @@ def presign_upload(payload: PresignRequest, request: Request, _auth=Depends(role
     return PresignResponse(upload_url=url, object_key=key, headers=headers)
 
 
-@app.post("/attachments/complete", response_model=Attachment, status_code=201)
+@app.post(
+    "/attachments/complete",
+    response_model=Attachment,
+    status_code=201,
+    tags=["Attachments"],
+    responses={400:{"model":ErrorResponse},401:{"model":ErrorResponse},403:{"model":ErrorResponse}},
+    openapi_extra={
+        "x-codeSamples": [
+            {"lang":"cURL","label":"curl","source":"curl -X POST '{{baseUrl}}/attachments/complete' -H 'Authorization: Bearer {{token}}' -H 'Content-Type: application/json' -d '{\\n  \\\"assessment_id\\\": 1,\\n  \\\"object_key\\\": \\\"orgA/assessments/1/abc123_evidence.pdf\\\",\\n  \\\"filename\\\": \\\"evidence.pdf\\\",\\n  \\\"content_type\\\": \\\"application/pdf\\\",\\n  \\\"size\\\": 1048576\\n}'"}
+        ]
+    }
+)
 def complete_attachment(payload: AttachmentComplete, request: Request, _auth=Depends(role_required("editor"))):
     # Record the attachment metadata pointing to object storage
     now = datetime.utcnow().isoformat()

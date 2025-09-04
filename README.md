@@ -250,7 +250,8 @@ Tools
 - Insomnia collection: see `docs/insomnia_export.json`. Import and set `baseUrl` and `token` in the environment.
 - Postman collection: see `docs/postman_collection.json`. Import and set collection variables `baseUrl` and `token`.
  - Postman environment: see `docs/postman_environment.json` for local defaults.
- - OpenAPI: enriched with tags, error models, and request/response examples on v1 list routes and core write operations.
+- OpenAPI: enriched with tags, error models, and request/response examples on v1 list routes and core write operations.
+ - OpenAPI code samples: added `x-codeSamples` for common write flows (create assessment, audits, NCs, reviews) and attachments (multipart upload, presign, complete) to accelerate client integrations.
  - `OIDC_JWKS`: Inline JWKS JSON string for RS256 verification.
  - `OIDC_JWKS_PATH`: Filesystem path to JWKS JSON.
  - `OIDC_JWKS_URL`: JWKS URL (requires network access).
