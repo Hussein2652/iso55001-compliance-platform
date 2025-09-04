@@ -1,0 +1,5 @@
+Alembic migrations for ISO 55001 backend.
+
+Use:
+- export DATABASE_URL="sqlite:////absolute/path/app.db" (or Postgres URL)
+- alembic -c backend/alembic.ini upgrade head

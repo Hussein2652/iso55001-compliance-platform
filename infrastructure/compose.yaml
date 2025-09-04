@@ -1,0 +1,30 @@
+services:
+  backend:
+    build: ../backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Use SQLite by default; switch to Postgres by uncommenting below
+      - DATABASE_URL=sqlite:////app/backend/app.db
+      # - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/iso55001
+      # - API_TOKEN=change-me
+    volumes:
+      - ..:/app:rw
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=iso55001
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

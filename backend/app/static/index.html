@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ISO 55001 Dashboard</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      h1 { margin-bottom: 0.5rem; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; }
+      .muted { color: #666; font-size: 0.9rem; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border-bottom: 1px solid #eee; padding: 0.5rem; text-align: left; }
+      th { background: #fafafa; }
+      .pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.8rem; background: #eef; }
+    </style>
+  </head>
+  <body>
+    <h1>ISO 55001 Dashboard</h1>
+    <div class="muted">Quick snapshot of audits, nonconformities, and assessments</div>
+    <div style="margin: 1rem 0;">
+      <label>From: <input type="date" id="from-date"></label>
+      <label>To: <input type="date" id="to-date"></label>
+      <label>Severity:
+        <select id="severity">
+          <option value="">All</option>
+          <option>Minor</option>
+          <option>Major</option>
+          <option>Critical</option>
+        </select>
+      </label>
+      <button id="apply">Apply</button>
+    </div>
+    <div class="grid" id="kpi-cards"></div>
+    <h2>Overdue Nonconformities</h2>
+    <table id="overdue-table">
+      <thead>
+        <tr><th>ID</th><th>Description</th><th>Severity</th><th>Status</th><th>Due Date</th><th>Days Overdue</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <h2>Nonconformities Trends</h2>
+    <canvas id="nc-chart" width="800" height="300" style="max-width: 100%;"></canvas>
+    <script>
+      async function fetchJSON(path) {
+        const res = await fetch(path);
+        if (!res.ok) throw new Error('Request failed: ' + res.status);
+        return res.json();
+      }
+      function renderKPIs(data) {
+        const el = document.getElementById('kpi-cards');
+        el.innerHTML = '';
+        const cards = [
+          { title: 'Audits', value: data.audits.total, sub: JSON.stringify(data.audits.by_status) },
+          { title: 'NCs', value: data.nonconformities.total, sub: 'Overdue: ' + data.nonconformities.overdue },
+          { title: 'NC by Severity', value: '', sub: JSON.stringify(data.nonconformities.by_severity) },
+          { title: 'Assessments', value: '', sub: JSON.stringify(data.assessments.by_status) }
+        ];
+        for (const c of cards) {
+          const div = document.createElement('div');
+          div.className = 'card';
+          div.innerHTML = `<div class="muted">${c.title}</div><div style="font-size:1.8rem; font-weight:600;">${c.value}</div><div class="muted">${c.sub}</div>`;
+          el.appendChild(div);
+        }
+      }
+      function renderOverdue(data) {
+        const tbody = document.querySelector('#overdue-table tbody');
+        tbody.innerHTML = '';
+        for (const item of data.items.slice(0, 10)) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${item.id}</td><td>${item.description}</td><td><span class="pill">${item.severity}</span></td><td>${item.status}</td><td>${item.due_date||''}</td><td>${item.days_overdue??''}</td>`;
+          tbody.appendChild(tr);
+        }
+      }
+      function drawLineChart(canvas, labels, opened, closed) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        const W = canvas.width, H = canvas.height, P = 40;
+        const dataO = labels.map(l => opened[l] || 0);
+        const dataC = labels.map(l => closed[l] || 0);
+        const maxVal = Math.max(1, ...dataO, ...dataC);
+        const xStep = (W - 2*P) / Math.max(1, labels.length - 1);
+        const yScale = (H - 2*P) / maxVal;
+        ctx.strokeStyle = '#ddd';
+        ctx.beginPath();
+        ctx.moveTo(P, H - P);
+        ctx.lineTo(W - P, H - P);
+        ctx.moveTo(P, P);
+        ctx.lineTo(P, H - P);
+        ctx.stroke();
+        ctx.fillStyle = '#333';
+        ctx.font = '12px sans-serif';
+        for (let i = 0; i < labels.length; i++) {
+          const x = P + i * xStep;
+          ctx.fillText(labels[i], x - 15, H - P + 15);
+        }
+        function plot(data, color) {
+          ctx.strokeStyle = color; ctx.beginPath();
+          data.forEach((v,i) => {
+            const x = P + i*xStep;
+            const y = H - P - v*yScale;
+            if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+          });
+          ctx.stroke();
+        }
+        plot(dataO, '#3b82f6');
+        plot(dataC, '#ef4444');
+      }
+
+      async function init(params = {}) {
+        try {
+          const qs = new URLSearchParams();
+          if (params.created_from) qs.set('created_from', params.created_from);
+          if (params.created_to) qs.set('created_to', params.created_to);
+          const kpi = await fetchJSON('/kpi/overview?' + qs.toString());
+          renderKPIs(kpi);
+          const overdue = await fetchJSON('/kpi/overdue_nonconformities?days=0');
+          renderOverdue(overdue);
+          const tqs = new URLSearchParams();
+          if (params.from_date) tqs.set('from_date', params.from_date);
+          if (params.to_date) tqs.set('to_date', params.to_date);
+          if (params.severity) tqs.set('severity', params.severity);
+          const trends = await fetchJSON('/kpi/nc_trends?' + tqs.toString());
+          drawLineChart(document.getElementById('nc-chart'), trends.months, trends.opened, trends.closed);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      document.getElementById('apply').addEventListener('click', () => {
+        const from = document.getElementById('from-date').value;
+        const to = document.getElementById('to-date').value;
+        const sev = document.getElementById('severity').value;
+        init({ created_from: from, created_to: to, from_date: from, to_date: to, severity: sev });
+      });
+      init();
+    </script>
+  </body>
+  </html>
