@@ -141,9 +141,9 @@ Environment Variables
    - `OBJECT_STORE_SECRET_KEY`
    - `OBJECT_STORE_USE_PATH_STYLE` (`true`/`false`)
  - Upload limits: `MAX_UPLOAD_MB` (default `25`).
- - OpenTelemetry:
-   - `OTEL_ENABLED` (`true`/`false`)
-   - `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g., `http://otel-collector:4318`)
+- OpenTelemetry:
+  - `OTEL_ENABLED` (`true`/`false`)
+  - `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g., `http://otel-collector:4318`)
 
 Org Scoping
 - Dev: provide `X-Org-ID` header; queries are filtered by `org_id` and writes store it alongside `created_by`, `updated_by`, and `request_id`.
@@ -170,6 +170,62 @@ Fast Wins Next
 - Add strict content-type allow-list and optional SHA-256 recording for S3 objects.
 - Enforce org match on update/delete operations.
 - Generate Insomnia/Postman collection and add `/setup` endpoint to seed clauses idempotently.
+
+High‑Priority TODOs (Start Here)
+
+Foundations & Hardening
+- Postgres default in prod; keep SQLite for dev.
+- Enforce OIDC RS256 (JWKS) auth in prod; disable static token in prod.
+- Tenant guard: inject `org_id` from JWT; filter every query; forbid header override in prod.
+- Ship `organizations` migration + indices (`org_id, status, due_date`, `created_at`, etc.).
+- Structured JSON logs with `request_id`, `user`, `org`, latency.
+- RED metrics per route and OTEL spans when enabled.
+
+Evidence Governance (7.5)
+- Ensure bucket on startup; presign TTL 10–15 min.
+- MIME allow‑list and size limits before presign.
+- Store SHA‑256 and retention/hold/disposition fields on finalize (optional AV scan).
+
+Planning Core (Clause 6)
+- SAMP studio (6.2.1) with versioning and finance alignment.
+- Objectives & AMPs (6.2.2–6.2.3) linked to KPIs; review cadence.
+- Risks & Opportunities (6.1.2–6.1.3) with treatment & effectiveness.
+- Planned Changes (6.3) with pre‑implementation risk assessment.
+
+Operation (Clause 8)
+- Lifecycle controls matrix (create→dispose) with criteria & evidence.
+- Change control (8.2) incl. unintended consequence review.
+- Suppliers (8.3) with scope/interfaces/responsibilities/sharing + monitoring.
+
+Performance & Governance (Clause 9)
+- KPI engine (9.1): catalog, schedules, adapters, trend charts.
+- Internal audit program (9.2): templates, sampling, impartial assignment, findings workflow.
+- Management review pack (9.3): one‑click report (inputs, trends, risk/opportunity profile, framework effectiveness) → PDF/Word.
+
+Improvement (Clause 10)
+- NC/CAPA: RCA templates, effectiveness verification, recurrence‑prevention flag; closure‑time KPI.
+- Predictive actions (10.3): v1 interface for condition/performance/cost inputs → suggested intervention points; v2 pluggable model API.
+
+API & Security Polish
+- Move `/v1` prefix everywhere; unify list responses to `{items,total,limit,offset}`; keep `X-Total-Count`.
+- Add error models/examples; stricter CORS + security headers (HSTS, nosniff, CSP).
+- Tune rate limits and upload body caps.
+
+CI/CD & Testing
+- GitHub Actions: ruff + mypy + pytest + docker build + Trivy scan + push to GHCR.
+- Integration tests (Testcontainers Postgres); coverage ≥ 60%.
+- Ship Insomnia collection, `/setup` seed endpoint, and complete `.env.example`.
+
+UI/UX (initial)
+- OIDC login; role‑aware navigation.
+- Checklist + evidence upload (presign); inline gap scoring.
+- CRUD screens for SAMP/AMP, risks, KPIs, audits, NCs, reviews; exports & charts.
+- Dashboard: readiness %, clause heatmap, due items, audit schedule, NC backlog, KPI trend.
+
+Docs & Ops
+- Admin & auditor guides; API reference; architecture overview.
+- Backups & retention runbooks (DB PITR, object lifecycle).
+- Observability playbooks (alerts, log queries, tracing how‑to).
 
 CI
 - GitHub Actions workflow at `.github/workflows/ci.yml` runs lint, type-checks, tests, and Docker build on push/PR.
