@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -38,3 +40,18 @@ jobs:
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
+      - name: Ensure README updated when core changes present
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        run: |
+          set -e
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE_SHA" ]; then BASE_SHA=$(git rev-list --max-parents=0 HEAD); fi
+          CHANGED=$(git diff --name-only "$BASE_SHA"..HEAD)
+          echo "$CHANGED" | sed 's/^/ - /'
+          needs_docs_regex='^(backend/app/|backend/Dockerfile|backend/requirements|backend/alembic/|infrastructure/compose|infrastructure/.env|tests/|.github/workflows/)'
+          if echo "$CHANGED" | grep -Eq "$needs_docs_regex"; then
+            if ! echo "$CHANGED" | grep -q '^README.md$'; then
+              echo "README.md not updated for core changes." >&2
+              exit 1
+            fi
+          fi
