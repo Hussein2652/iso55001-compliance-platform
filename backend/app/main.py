@@ -19,7 +19,7 @@ from sqlalchemy import (
     Integer,
 )
 from contextlib import asynccontextmanager
-from .auth import require_write_auth, role_required
+from .auth import require_write_auth, role_required, optional_jwt_claims
 from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 from .logging_config import get_logger
 import time
@@ -386,13 +386,22 @@ class ManagementReview(BaseModel):
 async def lifespan(app: FastAPI):
     init_db()
     seed_clauses_if_empty()
+    # Ensure object store bucket exists (if configured)
+    try:
+        client, bucket = _get_s3_client()
+        if client and bucket:
+            buckets = [b.get('Name') for b in client.list_buckets().get('Buckets', [])]
+            if bucket not in buckets:
+                client.create_bucket(Bucket=bucket)
+    except Exception:
+        pass
     yield
 
 
 app = FastAPI(title="ISO 55001 Compliance API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=(os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",") if os.getenv("CORS_ALLOWED_ORIGINS") else ["*"]),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -464,7 +473,19 @@ async def add_request_id_and_collect_metrics(request: Request, call_next):
     start = time.perf_counter()
     # Capture auth/tenant context from headers if present
     request.state.request_id = req_id
-    request.state.org_id = request.headers.get("X-Org-ID") or os.getenv("DEFAULT_ORG_ID")
+    env_mode = os.getenv("ENV", "dev").lower()
+    org_header = request.headers.get("X-Org-ID")
+    # Load org from JWT claims when available
+    claims = optional_jwt_claims(request.headers.get("authorization"))
+    claim_org = None
+    if claims:
+        for k in ("org", "org_id", "tenant", "tid"):
+            if k in claims:
+                claim_org = str(claims[k]); break
+    if env_mode == "prod":
+        request.state.org_id = claim_org or os.getenv("DEFAULT_ORG_ID")
+    else:
+        request.state.org_id = org_header or claim_org or os.getenv("DEFAULT_ORG_ID")
     try:
         response: Response = await call_next(request)
     except Exception as exc:
@@ -512,6 +533,18 @@ async def add_request_id_and_collect_metrics(request: Request, call_next):
             }
         )
     )
+    return response
+
+
+# Security headers
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    if os.getenv("ENV", "dev").lower() == "prod":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Basic CSP for API; adjust as needed
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     return response
 
 

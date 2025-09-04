@@ -22,17 +22,22 @@ def require_write_auth(authorization: Optional[str] = Header(default=None)):
     oidc_jwks_url = os.getenv("OIDC_JWKS_URL")
     oidc_jwks_inline = os.getenv("OIDC_JWKS")
     oidc_jwks_path = os.getenv("OIDC_JWKS_PATH")
+    env_mode = os.getenv("ENV", "dev").lower()
 
     # If neither method configured, allow dev writes with admin role
-    if not (oidc_hs256_secret or api_token or oidc_jwks_url or oidc_jwks_inline or oidc_jwks_path):
+    if env_mode != "prod" and not (oidc_hs256_secret or api_token or oidc_jwks_url or oidc_jwks_inline or oidc_jwks_path):
         return {"auth": "dev-mode", "roles": ["admin"]}
 
     # Require a Bearer token header if auth is configured
     token = _require_bearer(authorization)
 
     # Decide which validator to use
-    # If a static API token is configured and the presented token doesn't look like a JWT, use static token path
-    if api_token and token.count('.') < 2:
+    # In prod, ignore static API token and enforce JWT RS256
+    if env_mode == "prod":
+        if token.count(".") < 2:
+            raise HTTPException(status_code=401, detail="JWT required in production")
+    # If a static API token is configured and the token doesn't look like a JWT, use static token path (dev/staging only)
+    if env_mode != "prod" and api_token and token.count('.') < 2:
         if token != api_token:
             raise HTTPException(status_code=403, detail="Invalid token")
         role = os.getenv("API_ROLE", "admin").strip().lower()
@@ -55,6 +60,9 @@ def require_write_auth(authorization: Optional[str] = Header(default=None)):
         treat_as_jwt = alg.startswith("RS") or alg.startswith("HS")
 
     if treat_as_jwt:
+        # In prod, enforce RS256 only
+        if env_mode == "prod" and not header.get("alg", "").upper().startswith("RS"):
+            raise HTTPException(status_code=403, detail="RS256 JWT required in production")
         # RS256 with JWKS
         if (oidc_jwks_inline or oidc_jwks_path or oidc_jwks_url) and header.get("alg", "").upper().startswith("RS"):
             try:
@@ -111,6 +119,9 @@ def require_write_auth(authorization: Optional[str] = Header(default=None)):
             except Exception as e:
                 raise HTTPException(status_code=403, detail=f"Invalid RS256 token: {str(e)}")
         try:
+            # HS256 accepted only outside prod
+            if env_mode == "prod":
+                raise jwt.InvalidTokenError("HS256 not permitted in production")
             options = {"verify_signature": True, "verify_exp": True, "verify_aud": bool(oidc_audience)}
             claims = jwt.decode(
                 token,
@@ -129,7 +140,7 @@ def require_write_auth(authorization: Optional[str] = Header(default=None)):
         except jwt.InvalidTokenError as e:
             raise HTTPException(status_code=403, detail=f"Invalid token: {str(e)}")
 
-    if api_token:
+    if env_mode != "prod" and api_token:
         if token != api_token:
             raise HTTPException(status_code=403, detail="Invalid token")
         role = os.getenv("API_ROLE", "admin").strip().lower()
@@ -174,3 +185,58 @@ def _extract_roles(claims: dict) -> set:
     if not roles:
         roles = {"viewer"}
     return roles
+
+
+def optional_jwt_claims(authorization: Optional[str] = Header(default=None)):
+    """Best-effort decode of JWT claims for read scoping; never raises, returns dict or None."""
+    try:
+        token = _require_bearer(authorization)
+    except HTTPException:
+        return None
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception:
+        return None
+    oidc_issuer = os.getenv("OIDC_ISSUER")
+    oidc_audience = os.getenv("OIDC_AUDIENCE")
+    oidc_jwks_url = os.getenv("OIDC_JWKS_URL")
+    oidc_jwks_inline = os.getenv("OIDC_JWKS")
+    oidc_jwks_path = os.getenv("OIDC_JWKS_PATH")
+    try:
+        if header.get("alg", "").upper().startswith("RS") and (oidc_jwks_url or oidc_jwks_inline or oidc_jwks_path):
+            if oidc_jwks_inline:
+                jwks = json.loads(oidc_jwks_inline)
+                from jwt.algorithms import RSAAlgorithm
+                kid = header.get("kid")
+                selected = None
+                for k in (jwks.get("keys", []) if isinstance(jwks, dict) else jwks):
+                    if not kid or k.get("kid") == kid:
+                        selected = k; break
+                if not selected:
+                    return None
+                key = RSAAlgorithm.from_jwk(json.dumps(selected))
+                claims = jwt.decode(token, key, algorithms=["RS256"], audience=oidc_audience or None, issuer=oidc_issuer or None)
+                return dict(claims)
+            elif oidc_jwks_path:
+                from jwt.algorithms import RSAAlgorithm
+                jwks = json.loads(Path(oidc_jwks_path).read_text(encoding="utf-8"))
+                kid = header.get("kid")
+                selected = None
+                for k in (jwks.get("keys", []) if isinstance(jwks, dict) else jwks):
+                    if not kid or k.get("kid") == kid:
+                        selected = k; break
+                if not selected:
+                    return None
+                key = RSAAlgorithm.from_jwk(json.dumps(selected))
+                claims = jwt.decode(token, key, algorithms=["RS256"], audience=oidc_audience or None, issuer=oidc_issuer or None)
+                return dict(claims)
+            else:
+                from jwt import PyJWKClient
+                jwk_client = PyJWKClient(oidc_jwks_url)  # type: ignore
+                signing_key = jwk_client.get_signing_key_from_jwt(token)
+                key = signing_key.key
+                claims = jwt.decode(token, key, algorithms=["RS256"], audience=oidc_audience or None, issuer=oidc_issuer or None)
+                return dict(claims)
+    except Exception:
+        return None
+    return None

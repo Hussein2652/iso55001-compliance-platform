@@ -12,6 +12,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
       - name: Install deps
         run: |
           pip install -r backend/requirements.txt -r backend/requirements-dev.txt
@@ -26,4 +30,11 @@ jobs:
       - name: Tests
         run: pytest -q
       - name: Build Docker image
-        run: docker build -t iso55001-backend -f backend/Dockerfile .
+        run: docker build -t iso55001-backend:ci -f backend/Dockerfile .
+      - name: Security scan (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: iso55001-backend:ci
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
