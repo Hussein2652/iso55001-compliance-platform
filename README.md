@@ -4,6 +4,20 @@ Overview
 - Goal: Stand up a minimal, production-ready API to manage ISO 55001 clauses and capture compliance assessments (evidence, status, owners, due dates). Build on provided standard materials in `data/`.
 - Inputs: `data/project_files/iso55001_clauses_seed.json` provides the seed list of ISO 55001:2024 clauses.
 
+AI Layer (RAG + Generation)
+- Vector store: pgvector on Postgres (dev fallback: JSON vectors on SQLite). New tables: `ai_documents`, `ai_chunks`, `ai_embeddings`, `ai_runs`.
+- Endpoints:
+  - `POST /ai/ingest` — store a document (text, s3 path), chunk, embed, index per org.
+  - `POST /ai/search` — semantic search with cosine; returns refs `{document_id, ord}`.
+  - `POST /ai/generate` — tasks: `capa_draft`, `clause_map`, `samp_draft`, `objective_smartify`, `risk_treatment_suggest`.
+  - `POST /ai/vision` — VLM/ocr assisted field extraction (nameplates, layout hints).
+  - `POST /ai/review-pack` — drafts management review narrative and saves a controlled document.
+- LLM/VLM config (OpenAI-compatible HTTP or local models):
+  - LLM: `LLM_HTTP_BASE`, `LLM_HTTP_MODEL` (e.g., llama-3.1-8b-instruct), optional `LLM_HTTP_API_KEY`.
+  - Local model (optional): `LLM_LOCAL_PATH` (defaults to `models/llama-3.1-8b-instruct-gptq-int4`).
+  - VLM: `VLM_HTTP_BASE`, `VLM_HTTP_MODEL` (e.g., llama-3.2-vision); OCR fallback uses pytesseract.
+  - Policy: org-scoped retrieval, low temp for extraction, strict JSON validation, citations required.
+
 MVP Scope
 - Clauses: Serve and search ISO 55001 clauses from the seed JSON.
 - Assessments: Create/read/update assessment records per clause with status, evidence, owner, and due date.
@@ -71,6 +85,7 @@ API (high level)
 - `PATCH /management-reviews/{id}` — update review (editor role).
 - `GET /kpi/overview` — summary counts (audits by status, NCs by status/severity, overdue NCs, assessments by status).
   - Filters: `created_from`, `created_to`, `as_of` (for overdue calculations).
+ - AI endpoints: `POST /ai/ingest`, `POST /ai/search`, `POST /ai/generate`, `POST /ai/vision`, `POST /ai/review-pack`.
 - `GET /kpi/nc_trends?from_date=&to_date=&severity=` — monthly opened/closed counts (YYYY-MM) for Nonconformities.
 - `GET /kpi/overdue_nonconformities?days=` — list open overdue NCs with `days_overdue`.
 - `GET /export/audits.csv` — CSV export of audits.
@@ -158,6 +173,11 @@ Environment Variables
 - OpenTelemetry:
   - `OTEL_ENABLED` (`true`/`false`)
   - `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g., `http://otel-collector:4318`)
+ - AI/Models:
+   - `LLM_HTTP_BASE`, `LLM_HTTP_MODEL`, `LLM_HTTP_API_KEY` (OpenAI-compatible)
+   - `LLM_LOCAL_PATH` for local model weights (defaults to `models/llama-3.1-8b-instruct-gptq-int4`)
+   - `VLM_HTTP_BASE`, `VLM_HTTP_MODEL` for vision; OCR fallback requires `pytesseract`.
+ - Rate limiting: `REDIS_URL` (optional). Object store SSE: `OBJECT_STORE_SSE`, `OBJECT_STORE_KMS_KEY`. AV: `AV_SCAN_CMD`.
 
 Org Scoping
 - Dev: provide `X-Org-ID` header; queries are filtered by `org_id` and writes store it alongside `created_by`, `updated_by`, and `request_id`.

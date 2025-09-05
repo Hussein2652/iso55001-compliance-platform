@@ -31,8 +31,11 @@ Thumbs.db
 
 # Project data
 backend/app.db
+backend/*.db
 backend/evidence/
+
+# Local models (do not commit large weights)
+models/
 
 # Docker
 .env
-

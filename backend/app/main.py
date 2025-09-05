@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from pydantic.generics import GenericModel
 from typing import TypeVar, Generic
+from .ai_model import ModelClient
 from sqlalchemy import (
     create_engine,
     text,
@@ -33,6 +34,9 @@ from fastapi import APIRouter
 import subprocess
 import re
 from typing import Dict
+import math
+import hashlib
+import base64
 
 
 # --- S3/MinIO client helper ---
@@ -149,8 +153,15 @@ nonconformities_table = Table(
     Column("clause_id", String),
     Column("severity", String, nullable=False),
     Column("status", String, nullable=False),
+    Column("state", String),
     Column("description", String, nullable=False),
     Column("corrective_action", String),
+    Column("containment", String),
+    Column("root_cause", String),
+    Column("preventive_action", String),
+    Column("verification_method", String),
+    Column("verified_by", String),
+    Column("verified_on", String),
     Column("owner", String),
     Column("due_date", String),
     Column("closed_date", String),
@@ -160,6 +171,53 @@ nonconformities_table = Table(
     Column("created_by", String),
     Column("updated_by", String),
     Column("request_id", String),
+)
+
+# Documents & KPI tables (for SQLite dev init)
+documents_table = Table(
+    "documents",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("org_id", String, nullable=False),
+    Column("type", String),
+    Column("title", String, nullable=False),
+    Column("version", String),
+    Column("status", String),
+    Column("approver_id", String),
+    Column("effective_date", String),
+    Column("next_review", String),
+    Column("s3_key", String),
+    Column("retention_until", String),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("created_by", String),
+    Column("updated_by", String),
+    Column("request_id", String),
+)
+
+kpi_definitions_table = Table(
+    "kpi_definitions",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("org_id", String, nullable=False),
+    Column("name", String, nullable=False),
+    Column("method", String),
+    Column("frequency", String),
+    Column("target", String),
+    Column("owner_id", String),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+kpi_results_table = Table(
+    "kpi_results",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("kpi_id", String, nullable=False),
+    Column("period", String, nullable=False),
+    Column("value", String),
+    Column("evaluation", String),
+    Column("created_at", String, nullable=False),
 )
 
 management_reviews_table = Table(
@@ -180,6 +238,58 @@ management_reviews_table = Table(
     Column("created_by", String),
     Column("updated_by", String),
     Column("request_id", String),
+)
+
+
+# --- AI / RAG tables ---
+ai_documents_table = Table(
+    "ai_documents",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("org_id", String, nullable=False),
+    Column("source_type", String),
+    Column("title", String),
+    Column("path", String),
+    Column("mime", String),
+    Column("hash", String),
+    Column("created_at", String, nullable=False),
+)
+
+ai_chunks_table = Table(
+    "ai_chunks",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("document_id", String, nullable=False),
+    Column("ord", Integer, nullable=False),
+    Column("text", String, nullable=False),
+    Column("token_count", Integer),
+)
+
+ai_embeddings_table = Table(
+    "ai_embeddings",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("chunk_id", String, nullable=False),
+    # For SQLite we store JSON-encoded vectors; for Postgres this table
+    # exists with native vector type and we will insert via literal casting.
+    Column("vector", String),
+)
+
+ai_runs_table = Table(
+    "ai_runs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("org_id", String, nullable=False),
+    Column("user_id", String),
+    Column("task", String, nullable=False),
+    Column("model", String),
+    Column("temperature", String),
+    Column("top_p", String),
+    Column("seed", String),
+    Column("inputs_json", String),
+    Column("retrieved_refs_json", String),
+    Column("output_json", String),
+    Column("created_at", String, nullable=False),
 )
 
 
@@ -321,6 +431,102 @@ class Organization(BaseModel):
     created_at: str
 
 
+# --- Documents & KPI Schemas ---
+class DocumentCreate(BaseModel):
+    org_id: str
+    type: Optional[str] = None
+    title: str
+    version: Optional[str] = None
+    status: Optional[str] = None
+    approver_id: Optional[str] = None
+    effective_date: Optional[date] = None
+    next_review: Optional[date] = None
+    s3_key: Optional[str] = None
+    retention_until: Optional[date] = None
+
+
+class Document(BaseModel):
+    id: str
+    org_id: str
+    type: Optional[str]
+    title: str
+    version: Optional[str]
+    status: Optional[str]
+    approver_id: Optional[str]
+    effective_date: Optional[date] = None
+    next_review: Optional[date] = None
+    s3_key: Optional[str]
+    retention_until: Optional[date] = None
+    created_at: str
+    updated_at: str
+
+
+class DocumentUpdate(BaseModel):
+    title: Optional[str] = None
+    version: Optional[str] = None
+    status: Optional[str] = None
+    approver_id: Optional[str] = None
+    effective_date: Optional[date] = None
+    next_review: Optional[date] = None
+    s3_key: Optional[str] = None
+    retention_until: Optional[date] = None
+
+
+class KPIOverview(BaseModel):
+    total_definitions: int
+    total_results: int
+    latest_periods: List[str]
+
+
+# --- Planning Schemas ---
+class SAMPCreate(BaseModel):
+    org_id: str
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    value_definition: Optional[str] = None
+    decision_criteria: Optional[str] = None
+    risk_appetite: Optional[str] = None
+    finance_link: Optional[str] = None
+
+
+class SAMP(BaseModel):
+    id: str
+    org_id: str
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+    value_definition: Optional[str] = None
+    decision_criteria: Optional[str] = None
+    risk_appetite: Optional[str] = None
+    finance_link: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class ObjectiveCreate(BaseModel):
+    org_id: str
+    samp_id: Optional[str] = None
+    name: str
+    measure: Optional[str] = None
+    target: Optional[str] = None
+    due_date: Optional[date] = None
+    owner_id: Optional[str] = None
+    stakeholder_ref: Optional[str] = None
+
+
+class Objective(BaseModel):
+    id: str
+    org_id: str
+    samp_id: Optional[str]
+    name: str
+    measure: Optional[str]
+    target: Optional[str]
+    due_date: Optional[date] = None
+    owner_id: Optional[str] = None
+    stakeholder_ref: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
 class AuditStatus(str, Enum):
     Planned = "Planned"
     InProgress = "InProgress"
@@ -368,13 +574,26 @@ class NCStatusEnum(str, Enum):
     Closed = "Closed"
 
 
+class NCStateEnum(str, Enum):
+    New = "New"
+    Analysis = "Analysis"
+    Action = "Action"
+    Verification = "Verification"
+    Closed = "Closed"
+
+
 class NonconformityCreate(BaseModel):
     description: str
     severity: SeverityEnum
     status: NCStatusEnum = NCStatusEnum.Open
+    state: Optional[NCStateEnum] = NCStateEnum.New
     audit_id: Optional[int] = None
     clause_id: Optional[str] = None
     corrective_action: Optional[str] = None
+    containment: Optional[str] = None
+    root_cause: Optional[str] = None
+    preventive_action: Optional[str] = None
+    verification_method: Optional[str] = None
     owner: Optional[str] = None
     due_date: Optional[date] = None
     model_config = {"json_schema_extra": {"examples": [{
@@ -392,9 +611,16 @@ class NonconformityUpdate(BaseModel):
     description: Optional[str] = None
     severity: Optional[SeverityEnum] = None
     status: Optional[NCStatusEnum] = None
+    state: Optional[NCStateEnum] = None
     audit_id: Optional[int] = None
     clause_id: Optional[str] = None
     corrective_action: Optional[str] = None
+    containment: Optional[str] = None
+    root_cause: Optional[str] = None
+    preventive_action: Optional[str] = None
+    verification_method: Optional[str] = None
+    verified_by: Optional[str] = None
+    verified_on: Optional[date] = None
     owner: Optional[str] = None
     due_date: Optional[date] = None
     closed_date: Optional[date] = None
@@ -406,9 +632,16 @@ class Nonconformity(BaseModel):
     description: str
     severity: SeverityEnum
     status: NCStatusEnum
+    state: Optional[NCStateEnum] = None
     audit_id: Optional[int]
     clause_id: Optional[str]
     corrective_action: Optional[str]
+    containment: Optional[str]
+    root_cause: Optional[str]
+    preventive_action: Optional[str]
+    verification_method: Optional[str]
+    verified_by: Optional[str]
+    verified_on: Optional[date]
     owner: Optional[str]
     due_date: Optional[date]
     closed_date: Optional[date]
@@ -461,6 +694,84 @@ class ManagementReview(BaseModel):
     updated_at: str
 
 
+# --- AI Schemas ---
+class AIChunkerConfig(BaseModel):
+    max_tokens: int = 800
+    overlap: int = 120
+
+
+class AIDocumentIn(BaseModel):
+    title: Optional[str] = None
+    path: Optional[str] = None
+    mime: Optional[str] = None
+    text: Optional[str] = None
+
+
+class AIIngestRequest(BaseModel):
+    org_id: str
+    document: AIDocumentIn
+    chunker: Optional[AIChunkerConfig] = None
+
+
+class AISearchRequest(BaseModel):
+    org_id: str
+    query: str
+    top_k: int = 6
+
+
+class AISearchHit(BaseModel):
+    chunk_id: str
+    score: float
+    doc_title: Optional[str] = None
+    ref: Dict[str, str]
+
+
+class AISearchResponse(BaseModel):
+    hits: List[AISearchHit]
+
+
+class AIGenerateIn(BaseModel):
+    org_id: str
+    task: str  # e.g., capa_draft, clause_map, samp_draft, objective_smartify, risk_treatment_suggest
+    inputs: Dict
+    retrieval: Optional[Dict] = None
+    model: Optional[Dict] = None
+
+
+class CAPAOut(BaseModel):
+    containment: str
+    root_cause: str
+    corrective_action: str
+    preventive_action: str
+    verification_method: str
+    citations: List[Dict]
+
+
+class AIVisionIn(BaseModel):
+    org_id: str
+    image_path: str
+    task: str  # nameplate_ocr|scan_layout
+    hints: Optional[Dict] = None
+
+
+class AIVisionOut(BaseModel):
+    fields: Dict[str, str]
+    citations: List[Dict]
+
+
+class ReviewPackIn(BaseModel):
+    org_id: str
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
+
+
+class ReviewPackOut(BaseModel):
+    document_id: str
+    title: str
+    narrative: str
+    citations: List[Dict]
+
+
 # --- App ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -490,6 +801,9 @@ openapi_tags = [
     {"name": "Exports", "description": "CSV/XLSX exports"},
     {"name": "Organizations", "description": "Tenant management (admin)"},
     {"name": "Setup", "description": "Admin bootstrap utilities"},
+    {"name": "AI", "description": "RAG ingestion and search"},
+    {"name": "Documents", "description": "Controlled documents (7.5)"},
+    {"name": "KPIs", "description": "Performance indicators"},
 ]
 
 app = FastAPI(
@@ -518,6 +832,824 @@ def dashboard():
     if not index.exists():
         raise HTTPException(status_code=404, detail="Dashboard not available")
     return FileResponse(str(index))
+
+
+# --- Documents CRUD (minimal) ---
+@app.post("/documents", response_model=Document, tags=["Documents"])
+def create_document(payload: DocumentCreate, _auth=Depends(role_required("editor"))):
+    try:
+        init_db()
+    except Exception:
+        pass
+    now = datetime.utcnow().isoformat()
+    did = uuid.uuid4().hex
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            INSERT INTO documents (id, org_id, type, title, version, status, approver_id, effective_date, next_review, s3_key, retention_until, created_at, updated_at)
+            VALUES (:id,:org,:type,:title,:version,:status,:approver,:effective,:next_review,:s3,:retention,:created,:updated)
+            """
+        ), {
+            "id": did,
+            "org": payload.org_id,
+            "type": payload.type,
+            "title": payload.title,
+            "version": payload.version,
+            "status": payload.status,
+            "approver": payload.approver_id,
+            "effective": payload.effective_date.isoformat() if payload.effective_date else None,
+            "next_review": payload.next_review.isoformat() if payload.next_review else None,
+            "s3": payload.s3_key,
+            "retention": payload.retention_until.isoformat() if payload.retention_until else None,
+            "created": now,
+            "updated": now,
+        })
+        row = conn.execute(text("SELECT * FROM documents WHERE id = :id"), {"id": did}).mappings().first()
+    d = dict(row)
+    for k in ("effective_date","next_review","retention_until"):
+        if d.get(k):
+            try:
+                d[k] = date.fromisoformat(d[k])
+            except Exception:
+                d[k] = None
+    return Document(**d)
+
+
+@app.get("/documents", response_model=List[Document], tags=["Documents"])
+def list_documents(org_id: Optional[str] = None, status: Optional[str] = None, doc_type: Optional[str] = None, limit: int = 50, offset: int = 0):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    base = "SELECT * FROM documents"
+    filters = []
+    params = {"limit": limit, "offset": offset}
+    if org_id:
+        filters.append("org_id = :org_id"); params["org_id"] = org_id
+    if status:
+        filters.append("status = :status"); params["status"] = status
+    if doc_type:
+        filters.append("type = :type"); params["type"] = doc_type
+    if filters:
+        base += " WHERE " + " AND ".join(filters)
+    base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    with engine.connect() as conn:
+        rows = conn.execute(text(base), params).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("effective_date","next_review","retention_until"):
+            if d.get(k):
+                try:
+                    d[k] = date.fromisoformat(d[k])
+                except Exception:
+                    d[k] = None
+        out.append(Document(**d))
+    return out
+
+
+@app.get("/documents/{doc_id}", response_model=Document, tags=["Documents"])
+def get_document(doc_id: str):
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT * FROM documents WHERE id = :id"), {"id": doc_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+    d = dict(row)
+    for k in ("effective_date","next_review","retention_until"):
+        if d.get(k):
+            try:
+                d[k] = date.fromisoformat(d[k])
+            except Exception:
+                d[k] = None
+    return Document(**d)
+
+
+@app.patch("/documents/{doc_id}", response_model=Document, tags=["Documents"])
+def update_document(doc_id: str, payload: DocumentUpdate, _auth=Depends(role_required("editor"))):
+    updates = {}
+    for fld in ("title","version","status","approver_id","s3_key"):
+        val = getattr(payload, fld)
+        if val is not None:
+            updates[fld] = val
+    for fld in ("effective_date","next_review","retention_until"):
+        val = getattr(payload, fld)
+        if val is not None:
+            updates[fld] = val.isoformat() if val else None
+    # enforce status transitions
+    if "status" in updates:
+        with engine.connect() as conn:
+            cur = conn.execute(text("SELECT status FROM documents WHERE id = :id"), {"id": doc_id}).mappings().first()
+        curr = (cur or {}).get("status")
+        allowed = {
+            None: {"Draft"},
+            "Draft": {"Approved","Obsolete"},
+            "Approved": {"Obsolete"},
+            "Obsolete": set(),
+        }
+        nxt = updates["status"]
+        if curr not in allowed or nxt not in allowed[curr]:
+            raise HTTPException(status_code=400, detail=f"Invalid status transition: {curr} -> {nxt}")
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    updates["updated_at"] = datetime.utcnow().isoformat()
+    updates["id"] = doc_id
+    set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys() if k != "id"])
+    with engine.begin() as conn:
+        res = conn.execute(text(f"UPDATE documents SET {set_clause} WHERE id = :id"), updates)
+        if res.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Document not found")
+        row = conn.execute(text("SELECT * FROM documents WHERE id = :id"), {"id": doc_id}).mappings().first()
+    d = dict(row)
+    for k in ("effective_date","next_review","retention_until"):
+        if d.get(k):
+            try:
+                d[k] = date.fromisoformat(d[k])
+            except Exception:
+                d[k] = None
+    return Document(**d)
+@app.get("/kpi/overview", response_model=KPIOverview, tags=["KPIs"])
+def kpi_overview(org_id: str):
+    try:
+        init_db()
+    except Exception:
+        pass
+    with engine.connect() as conn:
+        total_def = conn.execute(text("SELECT COUNT(*) FROM kpi_definitions WHERE org_id = :org"), {"org": org_id}).scalar_one()
+        total_res = conn.execute(text("SELECT COUNT(*) FROM kpi_results kr JOIN kpi_definitions kd ON kd.id = kr.kpi_id WHERE kd.org_id = :org"), {"org": org_id}).scalar_one()
+        periods = conn.execute(text("SELECT DISTINCT period FROM kpi_results kr JOIN kpi_definitions kd ON kd.id = kr.kpi_id WHERE kd.org_id = :org ORDER BY period DESC LIMIT 6"), {"org": org_id}).fetchall()
+    latest_periods = [p[0] for p in periods]
+    return KPIOverview(total_definitions=int(total_def or 0), total_results=int(total_res or 0), latest_periods=latest_periods)
+
+
+# --- Planning minimal CRUD ---
+@app.post("/samps", response_model=SAMP, tags=["Planning"])
+def create_samp(payload: SAMPCreate, _auth=Depends(role_required("editor"))):
+    now = datetime.utcnow().isoformat()
+    sid = uuid.uuid4().hex
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO samps (id, org_id, period_start, period_end, value_definition, decision_criteria, risk_appetite, finance_link, created_at, updated_at) VALUES (:id,:org,:ps,:pe,:vd,:dc,:ra,:fl,:c,:u)"), {
+            "id": sid, "org": payload.org_id,
+            "ps": payload.period_start.isoformat() if payload.period_start else None,
+            "pe": payload.period_end.isoformat() if payload.period_end else None,
+            "vd": payload.value_definition, "dc": payload.decision_criteria,
+            "ra": payload.risk_appetite, "fl": payload.finance_link,
+            "c": now, "u": now,
+        })
+        row = conn.execute(text("SELECT * FROM samps WHERE id = :id"), {"id": sid}).mappings().first()
+    d = dict(row)
+    for k in ("period_start","period_end"):
+        if d.get(k):
+            try:
+                d[k] = date.fromisoformat(d[k])
+            except Exception:
+                d[k] = None
+    return SAMP(**d)
+
+
+@app.get("/samps", response_model=List[SAMP], tags=["Planning"])
+def list_samps(org_id: Optional[str] = None, limit: int = 50, offset: int = 0):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    base = "SELECT * FROM samps"
+    params = {"limit": limit, "offset": offset}
+    if org_id:
+        base += " WHERE org_id = :org"; params["org"] = org_id
+    base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    with engine.connect() as conn:
+        rows = conn.execute(text(base), params).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("period_start","period_end"):
+            if d.get(k):
+                try:
+                    d[k] = date.fromisoformat(d[k])
+                except Exception:
+                    d[k] = None
+        out.append(SAMP(**d))
+    return out
+
+
+@app.post("/objectives", response_model=Objective, tags=["Planning"])
+def create_objective(payload: ObjectiveCreate, _auth=Depends(role_required("editor"))):
+    now = datetime.utcnow().isoformat()
+    oid = uuid.uuid4().hex
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO am_objectives (id, org_id, samp_id, name, measure, target, due_date, owner_id, stakeholder_ref, created_at, updated_at) VALUES (:id,:org,:samp,:name,:measure,:target,:due,:owner,:stake,:c,:u)"), {
+            "id": oid, "org": payload.org_id, "samp": payload.samp_id,
+            "name": payload.name, "measure": payload.measure, "target": payload.target,
+            "due": payload.due_date.isoformat() if payload.due_date else None,
+            "owner": payload.owner_id, "stake": payload.stakeholder_ref,
+            "c": now, "u": now,
+        })
+        row = conn.execute(text("SELECT * FROM am_objectives WHERE id = :id"), {"id": oid}).mappings().first()
+    d = dict(row)
+    if d.get("due_date"):
+        try:
+            d["due_date"] = date.fromisoformat(d["due_date"])  # type: ignore
+        except Exception:
+            d["due_date"] = None
+    return Objective(**d)
+
+
+@app.get("/objectives", response_model=List[Objective], tags=["Planning"])
+def list_objectives(org_id: Optional[str] = None, samp_id: Optional[str] = None, limit: int = 50, offset: int = 0):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    base = "SELECT * FROM am_objectives"
+    filters = []
+    params = {"limit": limit, "offset": offset}
+    if org_id:
+        filters.append("org_id = :org"); params["org"] = org_id
+    if samp_id:
+        filters.append("samp_id = :samp"); params["samp"] = samp_id
+    if filters:
+        base += " WHERE " + " AND ".join(filters)
+    base += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
+    with engine.connect() as conn:
+        rows = conn.execute(text(base), params).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("due_date"):
+            try:
+                d["due_date"] = date.fromisoformat(d["due_date"])  # type: ignore
+            except Exception:
+                d["due_date"] = None
+        out.append(Objective(**d))
+    return out
+
+
+# --- AI utilities (chunking, embeddings) ---
+def _tokenize(text: str) -> List[str]:
+    # simple whitespace tokenization
+    return re.findall(r"\S+", text or "")
+
+
+def _chunk_text(text: str, max_tokens: int = 800, overlap: int = 120) -> List[str]:
+    tokens = _tokenize(text)
+    if max_tokens <= 0:
+        max_tokens = 800
+    if overlap < 0:
+        overlap = 0
+    chunks: List[str] = []
+    i = 0
+    n = len(tokens)
+    step = max(1, max_tokens - overlap)
+    while i < n:
+        window = tokens[i : min(n, i + max_tokens)]
+        if not window:
+            break
+        chunks.append(" ".join(window))
+        i += step
+    return chunks
+
+
+def _hash_embedding(text: str, dim: int = 1024) -> List[float]:
+    # Deterministic, lightweight fallback embedding (not semantic, dev-only)
+    if dim <= 0:
+        dim = 1024
+    vec = [0.0] * dim
+    for tok in _tokenize(text.lower()):
+        h = hashlib.sha256(tok.encode("utf-8")).digest()
+        # use first 8*4 bytes as 32-bit ints
+        for j in range(0, min(dim, len(h))):
+            vec[j] += h[j] / 255.0
+    # L2 normalize
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    dot = sum(a[i] * b[i] for i in range(n))
+    na = math.sqrt(sum(a[i] * a[i] for i in range(n))) or 1.0
+    nb = math.sqrt(sum(b[i] * b[i] for i in range(n))) or 1.0
+    return dot / (na * nb)
+
+
+def _vector_to_pg_text(vec: List[float]) -> str:
+    # pgvector accepts "[v1, v2, ...]" textual input for vector columns
+    return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+
+
+_PII_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PII_PHONE = re.compile(r"\+?\d[\d\-()\s]{6,}\d")
+
+
+def _redact_pii(text: str) -> str:
+    if not text:
+        return text
+    t = _PII_EMAIL.sub("<redacted:email>", text)
+    t = _PII_PHONE.sub("<redacted:phone>", t)
+    return t
+
+
+def _redact_dict(d: Dict) -> Dict:
+    try:
+        js = json.dumps(d)
+        return json.loads(_redact_pii(js))
+    except Exception:
+        return d
+
+
+def _retrieve_context(org_id: str, query: str, top_k: int = 6):
+    qvec = _hash_embedding(query, dim=1024)
+    with engine.connect() as conn:
+        sql = text(
+            """
+            SELECT e.id as eid, e.chunk_id as chunk_id, e.vector as vector, c.ord as ord, c.text as chunk_text,
+                   d.title as title, d.id as document_id
+            FROM ai_embeddings e
+            JOIN ai_chunks c ON c.id = e.chunk_id
+            JOIN ai_documents d ON d.id = c.document_id
+            WHERE d.org_id = :org_id
+            """
+        )
+        rows = conn.execute(sql, {"org_id": org_id}).mappings().all()
+    scored = []
+    for r in rows:
+        vec_raw = r.get("vector")
+        vec: List[float] = []
+        if isinstance(vec_raw, str):
+            try:
+                vec = json.loads(vec_raw)
+            except Exception:
+                s = vec_raw.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        vec = [float(x) for x in s[1:-1].split(",") if x.strip()]
+                    except Exception:
+                        vec = []
+        if not vec:
+            continue
+        score = _cosine(qvec, vec)
+        scored.append((score, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for score, r in scored[:top_k]:
+        out.append({
+            "score": float(round(score, 6)),
+            "chunk_id": r.get("chunk_id"),
+            "ord": int(r.get("ord") or 0),
+            "text": r.get("chunk_text"),
+            "document_id": r.get("document_id"),
+            "title": r.get("title"),
+        })
+    return out
+
+
+def _read_text_from_path(path: str) -> Optional[str]:
+    try:
+        if not path:
+            return None
+        if path.startswith("s3://"):
+            client, bucket = _get_s3_client()
+            if not client or not bucket:
+                return None
+            # path like s3://bucket/key or s3://key (assume configured bucket)
+            p = path[5:]
+            if "/" in p:
+                bkt, key = p.split("/", 1)
+                if bucket and bkt and bkt != bucket:
+                    # override bucket when fully qualified
+                    bucket = bkt
+            else:
+                key = p
+            obj = client.get_object(Bucket=bucket, Key=key)
+            data = obj["Body"].read()
+            # naive: try utf-8 decode; for PDFs we'd need proper parser
+            try:
+                return data.decode("utf-8")
+            except Exception:
+                return None
+        else:
+            fp = Path(path)
+            if fp.exists() and fp.is_file():
+                try:
+                    return fp.read_text(encoding="utf-8")
+                except Exception:
+                    return None
+    except Exception:
+        return None
+    return None
+
+
+# --- AI Endpoints ---
+@app.post("/ai/ingest", tags=["AI"])
+def ai_ingest(payload: AIIngestRequest, request: Request, _auth=Depends(role_required("editor"))):
+    # Ensure tables exist (especially in test/dev where lifespan may not run)
+    try:
+        init_db()
+    except Exception:
+        pass
+    org_id = payload.org_id
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    # Read text content
+    text_content: Optional[str] = payload.document.text if payload.document else None
+    if (not text_content) and payload.document and payload.document.path:
+        text_content = _read_text_from_path(payload.document.path)
+    if not text_content:
+        raise HTTPException(status_code=400, detail="No text content available (provide document.text or a readable path)")
+
+    chunk_cfg = payload.chunker or AIChunkerConfig()
+    chunks = _chunk_text(text_content, max_tokens=chunk_cfg.max_tokens, overlap=chunk_cfg.overlap)
+    now = datetime.utcnow().isoformat()
+    doc_id = uuid.uuid4().hex
+    # Hash of content (simple sha256 of entire text)
+    doc_hash = hashlib.sha256(text_content.encode("utf-8")).hexdigest()
+    title = (payload.document.title if payload.document else None) or (Path(payload.document.path).name if payload.document and payload.document.path else None) or "document"
+    mime = payload.document.mime if payload.document else None
+    src_type = "upload"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO ai_documents (id, org_id, source_type, title, path, mime, hash, created_at) VALUES (:id, :org_id, :source_type, :title, :path, :mime, :hash, :created_at)"
+            ),
+            {
+                "id": doc_id,
+                "org_id": org_id,
+                "source_type": src_type,
+                "title": title,
+                "path": (payload.document.path if payload.document else None),
+                "mime": mime,
+                "hash": doc_hash,
+                "created_at": now,
+            },
+        )
+
+        # Determine backend
+        is_sqlite = DEFAULT_DB_URL.startswith("sqlite")
+        is_postgres = (not is_sqlite) and (conn.engine.dialect.name == "postgresql")
+        for idx, chunk_text in enumerate(chunks):
+            chunk_id = uuid.uuid4().hex
+            tok_count = len(_tokenize(chunk_text))
+            conn.execute(
+                text(
+                    "INSERT INTO ai_chunks (id, document_id, ord, text, token_count) VALUES (:id, :document_id, :ord, :text, :token_count)"
+                ),
+                {
+                    "id": chunk_id,
+                    "document_id": doc_id,
+                    "ord": idx,
+                    "text": chunk_text,
+                    "token_count": tok_count,
+                },
+            )
+            emb = _hash_embedding(chunk_text, dim=1024)
+            if is_postgres:
+                vec_txt = _vector_to_pg_text(emb)
+                conn.execute(
+                    text(
+                        "INSERT INTO ai_embeddings (id, chunk_id, vector) VALUES (:id, :chunk_id, :vec::vector)"
+                    ),
+                    {"id": uuid.uuid4().hex, "chunk_id": chunk_id, "vec": vec_txt},
+                )
+            else:
+                conn.execute(
+                    text("INSERT INTO ai_embeddings (id, chunk_id, vector) VALUES (:id, :chunk_id, :vector)"),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "chunk_id": chunk_id,
+                        "vector": json.dumps(emb),
+                    },
+                )
+
+    return {"document_id": doc_id, "chunks": len(chunks)}
+
+
+@app.post("/ai/search", response_model=AISearchResponse, tags=["AI"])
+def ai_search(payload: AISearchRequest, request: Request, _auth=Depends(role_required("viewer"))):
+    try:
+        init_db()
+    except Exception:
+        pass
+    org_id = payload.org_id
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    qvec = _hash_embedding(payload.query, dim=1024)
+    top_k = max(1, min(50, int(payload.top_k or 6)))
+    with engine.connect() as conn:
+        is_sqlite = DEFAULT_DB_URL.startswith("sqlite")
+        is_postgres = (not is_sqlite) and (conn.engine.dialect.name == "postgresql")
+        if is_postgres:
+            sql = text(
+                """
+                SELECT e.id as eid, e.chunk_id as chunk_id, (e.vector)::text as vector,
+                       c.ord as ord, c.text as chunk_text, d.title as title, d.id as document_id
+                FROM ai_embeddings e
+                JOIN ai_chunks c ON c.id = e.chunk_id
+                JOIN ai_documents d ON d.id = c.document_id
+                WHERE d.org_id = :org_id
+                """
+            )
+        else:
+            sql = text(
+                """
+                SELECT e.id as eid, e.chunk_id as chunk_id, e.vector as vector,
+                       c.ord as ord, c.text as chunk_text, d.title as title, d.id as document_id
+                FROM ai_embeddings e
+                JOIN ai_chunks c ON c.id = e.chunk_id
+                JOIN ai_documents d ON d.id = c.document_id
+                WHERE d.org_id = :org_id
+                """
+            )
+        rows = conn.execute(sql, {"org_id": org_id}).mappings().all()
+
+    scored: List[tuple] = []
+    for r in rows:
+        vec_raw = r.get("vector")
+        vec: List[float] = []
+        if isinstance(vec_raw, str):
+            # try JSON first
+            try:
+                vec = json.loads(vec_raw)
+            except Exception:
+                # try pgvector text format: [v1, v2, ...]
+                s = vec_raw.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        vec = [float(x) for x in s[1:-1].split(",") if x.strip()]
+                    except Exception:
+                        vec = []
+        if not vec:
+            continue
+        score = _cosine(qvec, vec)
+        scored.append((score, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    hits: List[AISearchHit] = []
+    for score, r in scored[:top_k]:
+        hits.append(
+            AISearchHit(
+                chunk_id=r.get("chunk_id"),
+                score=float(round(score, 6)),
+                doc_title=r.get("title"),
+                ref={"document_id": r.get("document_id"), "ord": str(r.get("ord"))},
+            )
+        )
+    return AISearchResponse(hits=hits)
+
+
+@app.post("/ai/generate", tags=["AI"])
+def ai_generate(payload: AIGenerateIn, request: Request, _auth=Depends(role_required("editor"))):
+    # Strict tasks supported for now
+    task = (payload.task or "").strip().lower()
+    if task not in {"capa_draft", "clause_map", "samp_draft", "objective_smartify", "risk_treatment_suggest"}:
+        raise HTTPException(status_code=400, detail="Unsupported task")
+    org_id = payload.org_id
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    retrieval = payload.retrieval or {}
+    query = retrieval.get("query") or (payload.inputs.get("incident_text") if task == "capa_draft" else payload.inputs.get("text") or "")
+    top_k = int(retrieval.get("top_k") or 6)
+    ctx = _retrieve_context(org_id, query, top_k=top_k) if query else []
+    citations = [{"document_id": c["document_id"], "ord": c["ord"]} for c in ctx]
+
+    # Simple deterministic draft to satisfy schema + guardrails
+    if task == "capa_draft":
+        fields = payload.inputs or {}
+        temp = float((payload.model or {}).get("temperature", 0.3) if payload.model else 0.3)
+        max_new = int((payload.model or {}).get("max_new_tokens", 512) if payload.model else 512)
+        required = fields.get("required_fields") or ["containment","root_cause","corrective_action","preventive_action","verification_method"]
+        incident_text = str(fields.get("incident_text") or "")
+        # Prepare system + user prompts
+        ctx_text = "\n\n".join([f"[ref {i}] {c['text']}" for i, c in enumerate(ctx, start=1)])
+        sys_p = (
+            "You extract CAPA fields as strict JSON. "
+            "Use only provided context and inputs. Never hallucinate. "
+            "Always include a 'citations' array with {document_id, ord}."
+        )
+        user_p = (
+            f"Context:\n{ctx_text}\n\n"
+            f"Inputs:\nincident_text: {incident_text}\nrequired_fields: {required}\n\n"
+            "Return JSON with keys: containment, root_cause, corrective_action, preventive_action, verification_method, citations."
+        )
+        client = ModelClient()
+        gen = client.generate_structured(sys_p, user_p, temperature=temp, max_new_tokens=max_new)
+        out = None
+        if gen:
+            try:
+                out = CAPAOut(**gen).model_dump()
+            except Exception:
+                out = None
+        if out is None:
+            # fallback stub
+            def _stub(label):
+                return f"Draft {label.replace('_',' ')} based on incident context."
+            out = {
+                "containment": fields.get("containment") or _stub("containment"),
+                "root_cause": fields.get("root_cause") or _stub("root_cause"),
+                "corrective_action": fields.get("corrective_action") or _stub("corrective_action"),
+                "preventive_action": fields.get("preventive_action") or _stub("preventive_action"),
+                "verification_method": fields.get("verification_method") or _stub("verification_method"),
+                "citations": citations[:max(1, min(6, len(citations)))] if citations else [],
+            }
+        # Enforce citations policy
+        if not out.get("citations"):
+            return {"needs_more_evidence": True, "message": "Insufficient context for grounded answer"}
+        # Log ai_runs
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, model, temperature, top_p, seed, inputs_json, retrieved_refs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:model,:temp,:top_p,:seed,:inputs,:refs,:out,:ts)"), {
+                "id": uuid.uuid4().hex,
+                "org": org_id,
+                "user": (_auth or {}).get("sub"),
+                "task": task,
+                "model": (payload.model or {}).get("name") if payload.model else os.getenv('LLM_HTTP_MODEL'),
+                "temp": str(temp),
+                "top_p": str((payload.model or {}).get("top_p")) if payload.model else None,
+                "seed": str((payload.model or {}).get("seed")) if payload.model else None,
+                "inputs": json.dumps(_redact_dict(payload.inputs or {})),
+                "refs": json.dumps(citations),
+                "out": json.dumps(out),
+                "ts": datetime.utcnow().isoformat(),
+            })
+        return CAPAOut(**out)
+
+    if task == "clause_map":
+        text_in = (payload.inputs or {}).get("text") or ""
+        # naive clause heuristic + retrieval titles
+        clauses = []
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT clause_id, title FROM clauses ORDER BY clause_id")).mappings().all()
+        for r in rows:
+            cid = r["clause_id"]
+            title = r["title"]
+            if cid in text_in or title.lower() in text_in.lower():
+                clauses.append({"clause_id": cid, "title": title})
+        if not clauses and ctx:
+            clauses = [{"clause_id": c.get("title","unknown"), "title": c.get("title") or ""} for c in ctx[:3]]
+        if not citations:
+            return {"needs_more_evidence": True, "message": "Insufficient context for grounded mapping"}
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, inputs_json, retrieved_refs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:inputs,:refs,:out,:ts)"), {
+                "id": uuid.uuid4().hex,
+                "org": org_id,
+                "user": (_auth or {}).get("sub"),
+                "task": task,
+                "inputs": json.dumps(_redact_dict(payload.inputs or {})),
+                "refs": json.dumps(citations),
+                "out": json.dumps({"clauses": clauses, "citations": citations}),
+                "ts": datetime.utcnow().isoformat(),
+            })
+        return {"clauses": clauses, "citations": citations}
+
+    if task == "samp_draft":
+        fields = payload.inputs or {}
+        # Build a structured plan stub
+        out = {
+            "value_definition": fields.get("value_definition") or "Draft value definition based on context",
+            "decision_criteria": fields.get("decision_criteria") or "Draft decision criteria",
+            "risk_appetite": fields.get("risk_appetite") or "Draft risk appetite",
+        }
+        if not citations:
+            return {"needs_more_evidence": True, "message": "Insufficient context", "citations": []}
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, inputs_json, retrieved_refs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:inputs,:refs,:out,:ts)"), {
+                "id": uuid.uuid4().hex,
+                "org": org_id,
+                "user": (_auth or {}).get("sub"),
+                "task": task,
+                "inputs": json.dumps(_redact_dict(payload.inputs or {})),
+                "refs": json.dumps(citations),
+                "out": json.dumps(out),
+                "ts": datetime.utcnow().isoformat(),
+            })
+        out["citations"] = citations
+        return out
+
+    if task == "objective_smartify":
+        fields = payload.inputs or {}
+        name = fields.get("name") or "Objective"
+        measure = fields.get("measure") or "Define measure"
+        target = fields.get("target") or "Define target"
+        out = {"name": name, "measure": measure, "target": target}
+        if not citations:
+            return {"needs_more_evidence": True, "message": "Insufficient context", "citations": []}
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, inputs_json, retrieved_refs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:inputs,:refs,:out,:ts)"), {
+                "id": uuid.uuid4().hex,
+                "org": org_id,
+                "user": (_auth or {}).get("sub"),
+                "task": task,
+                "inputs": json.dumps(_redact_dict(payload.inputs or {})),
+                "refs": json.dumps(citations),
+                "out": json.dumps(out),
+                "ts": datetime.utcnow().isoformat(),
+            })
+        out["citations"] = citations
+        return out
+
+    if task == "risk_treatment_suggest":
+        fields = payload.inputs or {}
+        out = {
+            "treatments": [
+                {"action": "Mitigation plan", "rationale": "Based on retrieved context"},
+                {"action": "Monitoring", "rationale": "Track KPI and incidents"},
+            ]
+        }
+        if not citations:
+            return {"needs_more_evidence": True, "message": "Insufficient context", "citations": []}
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, inputs_json, retrieved_refs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:inputs,:refs,:out,:ts)"), {
+                "id": uuid.uuid4().hex,
+                "org": org_id,
+                "user": (_auth or {}).get("sub"),
+                "task": task,
+                "inputs": json.dumps(_redact_dict(payload.inputs or {})),
+                "refs": json.dumps(citations),
+                "out": json.dumps(out),
+                "ts": datetime.utcnow().isoformat(),
+            })
+        out["citations"] = citations
+        return out
+
+
+@app.post("/ai/vision", response_model=AIVisionOut, tags=["AI"])
+def ai_vision(payload: AIVisionIn, request: Request, _auth=Depends(role_required("editor"))):
+    try:
+        init_db()
+    except Exception:
+        pass
+    org_id = payload.org_id
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    # Try VLM client
+    client = ModelClient()
+    vlm_out = client.vision_extract(payload.image_path, instruction=f"Task: {payload.task}. Extract fields as JSON.", hints=payload.hints)
+    fields = {}
+    if isinstance(vlm_out, dict):
+        fields = vlm_out.get('fields', vlm_out)
+    # Heuristic enrichments from filename + hints
+    basename = Path(payload.image_path).name
+    m = re.search(r"([A-Za-z]-\d{3,})", basename)
+    if m and 'asset_tag' not in fields:
+        fields['asset_tag'] = m.group(1)
+    if payload.hints:
+        for k, v in payload.hints.items():
+            fields.setdefault(k, str(v))
+    citations: List[Dict] = []
+    # Log run
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, inputs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:inputs,:out,:ts)"), {
+            "id": uuid.uuid4().hex,
+            "org": org_id,
+            "user": (_auth or {}).get("sub"),
+            "task": f"vision:{payload.task}",
+            "inputs": json.dumps(_redact_dict({"image_path": payload.image_path, "hints": payload.hints or {}})),
+            "out": json.dumps({"fields": fields, "citations": citations}),
+            "ts": datetime.utcnow().isoformat(),
+        })
+    return AIVisionOut(fields=fields, citations=citations)
+
+
+@app.post("/ai/review-pack", response_model=ReviewPackOut, tags=["AI"])
+def ai_review_pack(payload: ReviewPackIn, request: Request, _auth=Depends(role_required("editor"))):
+    try:
+        init_db()
+    except Exception:
+        pass
+    org_id = payload.org_id
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    ps = payload.period_start.isoformat() if payload.period_start else None
+    pe = payload.period_end.isoformat() if payload.period_end else None
+    # Collect counts for narrative
+    with engine.connect() as conn:
+        audits = conn.execute(text("SELECT COUNT(*) FROM audits WHERE org_id = :org" + (" AND created_at >= :ps" if ps else "") + (" AND created_at <= :pe" if pe else "")), {k:v for k,v in {"org":org_id, "ps":ps, "pe":pe}.items() if v is not None}).scalar_one()
+        ncs_open = conn.execute(text("SELECT COUNT(*) FROM nonconformities WHERE org_id = :org AND status = 'Open'"), {"org": org_id}).scalar_one()
+        ncs_closed = conn.execute(text("SELECT COUNT(*) FROM nonconformities WHERE org_id = :org AND status = 'Closed'"), {"org": org_id}).scalar_one()
+        kpis = conn.execute(text("SELECT COUNT(*) FROM kpi_definitions WHERE org_id = :org"), {"org": org_id}).scalar_one()
+    title = f"Management Review {ps or ''} to {pe or ''}".strip()
+    narrative = (
+        f"This period recorded {int(audits or 0)} audits. Nonconformities: "
+        f"{int(ncs_open or 0)} open, {int(ncs_closed or 0)} closed. "
+        f"Configured KPIs: {int(kpis or 0)}."
+    )
+    citations: List[Dict] = []
+    doc_id = uuid.uuid4().hex
+    now = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO documents (id, org_id, type, title, status, created_at, updated_at) VALUES (:id,:org,:type,:title,:status,:created,:updated)"), {
+            "id": doc_id,
+            "org": org_id,
+            "type": "review_pack",
+            "title": title or "Management Review",
+            "status": "Draft",
+            "created": now,
+            "updated": now,
+        })
+        conn.execute(text("INSERT INTO ai_runs (id, org_id, user_id, task, inputs_json, output_json, created_at) VALUES (:id,:org,:user,:task,:inputs,:out,:ts)"), {
+            "id": uuid.uuid4().hex,
+            "org": org_id,
+            "user": (_auth or {}).get("sub"),
+            "task": "review_pack",
+            "inputs": json.dumps(_redact_dict({"period_start": ps, "period_end": pe})),
+            "out": json.dumps({"document_id": doc_id, "title": title, "narrative": narrative, "citations": citations}),
+            "ts": now,
+        })
+    return ReviewPackOut(document_id=doc_id, title=title or "Management Review", narrative=narrative, citations=citations)
+
 
 
 # --- OpenTelemetry (optional) ---
@@ -1213,13 +2345,29 @@ def _ensure_evidence_dir():
 _RATE_STATE = {}
 
 def rate_limit(key: str, limit: int = 30, window_sec: int = 60):
+    # Prefer Redis token bucket if REDIS_URL is set, fallback to in-memory
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            import redis  # type: ignore
+            r = redis.Redis.from_url(redis_url)
+            now = int(time.time())
+            window = now // window_sec
+            rk = f"ratelimit:{key}:{window}"
+            val = r.incr(rk)
+            if val == 1:
+                r.expire(rk, window_sec)
+            if val > limit:
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            return
+        except Exception:
+            pass
     import time as _t
     now = int(_t.time())
     window = now // window_sec
     k = (key, window)
     count = _RATE_STATE.get(k, 0) + 1
     _RATE_STATE[k] = count
-    # cleanup previous window
     prev = (key, window - 1)
     _RATE_STATE.pop(prev, None)
     if count > limit:
@@ -1384,6 +2532,13 @@ def presign_upload(payload: PresignRequest, request: Request, _auth=Depends(role
     if payload.size and payload.size > max_mb * 1024 * 1024:
         raise HTTPException(status_code=400, detail="file too large")
     params = {"Bucket": bucket, "Key": key}
+    # Server-side encryption (optional)
+    sse = os.getenv("OBJECT_STORE_SSE")  # AES256 or aws:kms
+    kms_key = os.getenv("OBJECT_STORE_KMS_KEY")
+    if sse:
+        params["ServerSideEncryption"] = sse
+        if sse == "aws:kms" and kms_key:
+            params["SSEKMSKeyId"] = kms_key
     if payload.content_type:
         params["ContentType"] = payload.content_type
     ttl = int(os.getenv("PRESIGN_TTL_SECONDS", "900"))
@@ -1391,6 +2546,11 @@ def presign_upload(payload: PresignRequest, request: Request, _auth=Depends(role
     headers = {}
     if payload.content_type:
         headers["Content-Type"] = payload.content_type
+    if sse:
+        # Clients must include these headers when uploading with presigned URL
+        headers["x-amz-server-side-encryption"] = sse
+        if sse == "aws:kms" and kms_key:
+            headers["x-amz-server-side-encryption-aws-kms-key-id"] = kms_key
     return PresignResponse(upload_url=url, object_key=key, headers=headers)
 
 
@@ -1444,7 +2604,25 @@ def complete_attachment(payload: AttachmentComplete, request: Request, _auth=Dep
             att_id = conn.execute(text("SELECT last_insert_rowid()")).scalar_one()
         else:
             att_id = res.scalar_one()
-        row = conn.execute(text("SELECT id, assessment_id, filename, content_type, size, created_at FROM attachments WHERE id = :id"), {"id": att_id}).mappings().first()
+        row = conn.execute(text("SELECT id, assessment_id, filename, content_type, size, created_at, stored_path FROM attachments WHERE id = :id"), {"id": att_id}).mappings().first()
+    # Optional AV scan hook
+    try:
+        scan_cmd = os.getenv("AV_SCAN_CMD")  # e.g., "clamscan {path}"
+        if scan_cmd and row and row.get("stored_path") and row.get("stored_path").startswith("s3://"):
+            # Skipping direct S3 download; AV hook best suited for local uploads or async workers
+            pass
+        elif scan_cmd and row and row.get("stored_path") and not row.get("stored_path").startswith("s3://"):
+            spath = row.get("stored_path")
+            cmd = scan_cmd.format(path=spath)
+            import subprocess as _sub
+            rc = _sub.call(cmd, shell=True)
+            if rc != 0:
+                raise HTTPException(status_code=400, detail="AV scan failed")
+    except HTTPException:
+        raise
+    except Exception:
+        # Do not fail uploads on scan errors unless explicitly configured
+        pass
     return Attachment(**dict(row))
 
 
@@ -1632,7 +2810,7 @@ def update_audit(audit_id: int, payload: AuditUpdate, request: Request, _auth=De
 # --- Nonconformities ---
 def _row_to_nc(row) -> Nonconformity:
     d = dict(row)
-    for k in ("due_date", "closed_date"):
+    for k in ("due_date", "closed_date", "verified_on"):
         if d.get(k):
             try:
                 d[k] = date.fromisoformat(d[k])  # type: ignore
@@ -1658,14 +2836,14 @@ def create_nonconformity(payload: NonconformityCreate, request: Request, _auth=D
         res = conn.execute(
             text(
                 """
-                INSERT INTO nonconformities (audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
-                VALUES (:audit_id, :clause_id, :severity, :status, :description, :corrective_action, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
+                INSERT INTO nonconformities (audit_id, clause_id, severity, status, state, description, corrective_action, containment, root_cause, preventive_action, verification_method, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:audit_id, :clause_id, :severity, :status, :state, :description, :corrective_action, :containment, :root_cause, :preventive_action, :verification_method, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 RETURNING id
                 """
                 if not DEFAULT_DB_URL.startswith("sqlite")
                 else """
-                INSERT INTO nonconformities (audit_id, clause_id, severity, status, description, corrective_action, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
-                VALUES (:audit_id, :clause_id, :severity, :status, :description, :corrective_action, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
+                INSERT INTO nonconformities (audit_id, clause_id, severity, status, state, description, corrective_action, containment, root_cause, preventive_action, verification_method, owner, due_date, created_at, updated_at, org_id, created_by, updated_by, request_id)
+                VALUES (:audit_id, :clause_id, :severity, :status, :state, :description, :corrective_action, :containment, :root_cause, :preventive_action, :verification_method, :owner, :due_date, :created_at, :updated_at, :org_id, :created_by, :updated_by, :request_id)
                 """
             ),
             {
@@ -1673,8 +2851,13 @@ def create_nonconformity(payload: NonconformityCreate, request: Request, _auth=D
                 "clause_id": payload.clause_id,
                 "severity": payload.severity.value if isinstance(payload.severity, SeverityEnum) else payload.severity,
                 "status": payload.status.value if isinstance(payload.status, NCStatusEnum) else payload.status,
+                "state": (payload.state.value if isinstance(payload.state, NCStateEnum) else payload.state) if payload.state else NCStateEnum.New.value,
                 "description": payload.description,
                 "corrective_action": payload.corrective_action,
+                "containment": payload.containment,
+                "root_cause": payload.root_cause,
+                "preventive_action": payload.preventive_action,
+                "verification_method": payload.verification_method,
                 "owner": payload.owner,
                 "due_date": payload.due_date.isoformat() if payload.due_date else None,
                 "created_at": now,
@@ -1758,6 +2941,23 @@ def update_nonconformity(nc_id: int, payload: NonconformityUpdate, request: Requ
         updates["severity"] = payload.severity.value if isinstance(payload.severity, SeverityEnum) else payload.severity
     if payload.status is not None:
         updates["status"] = payload.status.value if isinstance(payload.status, NCStatusEnum) else payload.status
+    if payload.state is not None:
+        # Enforce allowed transitions
+        with engine.connect() as conn:
+            cur = conn.execute(text("SELECT state FROM nonconformities WHERE id = :id"), {"id": nc_id}).mappings().first()
+        curr = (cur or {}).get("state")
+        allowed = {
+            None: {NCStateEnum.New.value},
+            NCStateEnum.New.value: {NCStateEnum.Analysis.value, NCStateEnum.Action.value},
+            NCStateEnum.Analysis.value: {NCStateEnum.Action.value, NCStateEnum.Verification.value},
+            NCStateEnum.Action.value: {NCStateEnum.Verification.value},
+            NCStateEnum.Verification.value: {NCStateEnum.Closed.value, NCStateEnum.Action.value},
+            NCStateEnum.Closed.value: set(),
+        }
+        target = payload.state.value if isinstance(payload.state, NCStateEnum) else str(payload.state)
+        if curr not in allowed or target not in allowed[curr]:
+            raise HTTPException(status_code=400, detail=f"Invalid state transition: {curr} -> {target}")
+        updates["state"] = target
     if payload.audit_id is not None:
         # Validate audit exists
         with engine.connect() as conn:
@@ -1773,6 +2973,18 @@ def update_nonconformity(nc_id: int, payload: NonconformityUpdate, request: Requ
         updates["clause_id"] = payload.clause_id
     if payload.corrective_action is not None:
         updates["corrective_action"] = payload.corrective_action
+    if payload.containment is not None:
+        updates["containment"] = payload.containment
+    if payload.root_cause is not None:
+        updates["root_cause"] = payload.root_cause
+    if payload.preventive_action is not None:
+        updates["preventive_action"] = payload.preventive_action
+    if payload.verification_method is not None:
+        updates["verification_method"] = payload.verification_method
+    if payload.verified_by is not None:
+        updates["verified_by"] = payload.verified_by
+    if payload.verified_on is not None:
+        updates["verified_on"] = payload.verified_on.isoformat() if payload.verified_on else None
     if payload.owner is not None:
         updates["owner"] = payload.owner
     if payload.due_date is not None:
